@@ -1,0 +1,25 @@
+name: Validate Swing Code
+on:
+  push:
+    paths:
+      - 'engine.py'
+      - 'strategy.py'
+      - 'replay.py'
+      - 'tests/**'
+      - 'requirements.txt'
+      - '.github/workflows/**'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+      - run: pip install -r requirements.txt pytest
+      - run: python -m compileall -q engine.py strategy.py replay.py
+      - run: python -m pytest -q tests
