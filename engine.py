@@ -39,11 +39,16 @@ def run():
     clock = trading.get_clock()
     now = datetime.now(timezone.utc)
     LOG.info("Paper account status=%s clock_open=%s", account.status, clock.is_open)
-    if not clock.is_open:
-        LOG.info("Market closed: no entries")
+    historical_observation = flag("OBSERVATION_ONLY")
+    if historical_observation:
+        LOG.info("Historical observation enabled: market_open=%s; paper orders ALWAYS disabled", clock.is_open)
+    elif not clock.is_open:
+        LOG.info("Market closed: no entries (set OBSERVATION_ONLY=true to inspect historical candles)")
         return
     if account.trading_blocked or account.account_blocked:
         raise RuntimeError("Trading blocked")
+    if historical_observation and flag("ENABLE_PAPER_ORDERS"):
+        raise RuntimeError("Unsafe configuration: historical observation cannot enable orders")
     if not flag("ENABLE_PAPER_ORDERS"):
         LOG.info("Observation mode: ENABLE_PAPER_ORDERS not true")
 
@@ -84,6 +89,9 @@ def run():
             LOG.info("%s: insufficient bars", symbol)
             continue
         latest = frame.iloc[-1]
+        last_time = frame.index[-1].tz_convert(NY)
+        if historical_observation:
+            LOG.info("%s: inspecting historical bar at %s (not a live signal)", symbol, last_time.isoformat())
         previous = frame.iloc[-21:-1]
         # Experimental signal only: close above previous 20-bar high with rising volume.
         breakout = float(latest.close) > float(previous.high.max())
@@ -104,8 +112,8 @@ def run():
         if qty < 1:
             LOG.info("%s: size below one share", symbol)
             continue
-        LOG.info("SIGNAL %s qty=%s reference=%s stop_reference=%s", symbol, qty, price, stop)
-        if not flag("ENABLE_PAPER_ORDERS"):
+        LOG.info("%s %s qty=%s reference=%s stop_reference=%s", "HISTORICAL_SIGNAL" if historical_observation else "SIGNAL", symbol, qty, price, stop)
+        if historical_observation or not flag("ENABLE_PAPER_ORDERS"):
             continue
         # Explicit paper-only order. Market order can fill at a different price.
         # This prototype DOES NOT place a protective stop: keep orders disabled
