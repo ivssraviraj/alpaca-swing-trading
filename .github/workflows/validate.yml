@@ -4,6 +4,7 @@ on:
     paths:
       - 'engine.py'
       - 'strategy.py'
+      - 'data_audit.py'
       - 'replay.py'
       - 'tests/**'
       - 'requirements.txt'
@@ -21,5 +22,5 @@ jobs:
           python-version: '3.11'
           cache: pip
       - run: pip install -r requirements.txt pytest
-      - run: python -m compileall -q engine.py strategy.py replay.py
+      - run: python -m compileall -q engine.py strategy.py replay.py data_audit.py
       - run: python -m pytest -q tests

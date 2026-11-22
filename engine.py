@@ -554,8 +554,11 @@ def main():
     days = args.days if args.mode == "replay" else 16
     intraday, daily = get_frames(clients.market, SYMBOLS, days)
     if args.mode == "replay":
+        replay_time_exit_days = (int(os.getenv("TIME_EXIT_CALENDAR_DAYS", "21"))
+                                 if flag("ENABLE_TIME_EXITS") else None)
         result = run_replay(intraday, daily, starting_cash=float(clients.limits.strategy_capital),
-                            limits=clients.limits)
+                            limits=clients.limits,
+                            time_exit_calendar_days=replay_time_exit_days)
         LOG.info("REPLAY (indicative, IEX-only): %s", json.dumps(result))
     elif args.mode == "observe":
         account = clients.trading.get_account()

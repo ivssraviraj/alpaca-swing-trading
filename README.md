@@ -1,4 +1,44 @@
-# Alpaca Swing Trading — consolidated paper-only engine
+# Alpaca Swing Trading — Audit v2 (paper orders remain disabled)
+
+
+## Why this audit update is necessary
+
+The first 45-calendar-day replay reported 12 closed trades, a -$592.63 realized P&L,
+and an 8.3% win rate, but only **858 five-minute bars per symbol**. For an
+approximately 32-full-session Oct 8–Nov 20 span, an uninterrupted regular-session
+series would contain roughly 2,496 five-minute bars, excluding early closes.
+The issue may reflect IEX feed sparsity, data-provider limits or incomplete retrieval;
+**it has not been diagnosed yet**. Never interpret backtest returns as statistically
+meaningful before reviewing data coverage.
+
+The old replay also had an unconditional 21-calendar-day time exit while the
+paper execution engine has time exits OFF by default. Version 2 aligns the
+defaults and therefore produces **different replay results**. It additionally
+rejects stale next-bar entries, adds approximate daily bar-coverage diagnostics,
+setup-level trade statistics, and a marked-equity drawdown estimate.
+
+**No strategy parameters are optimized here. Paper trading remains disabled.**
+
+### One consolidated repository update
+
+Unzip this package and replace the matching files in your existing repository
+**in one commit**. Keep the Alpaca GitHub secrets and existing repository
+variables as they are. New file: `data_audit.py`. Do not add another scheduled
+workflow; only replace `.github/workflows/swing-scan.yml` and `validate.yml`.
+
+1. Wait for **Validate Swing Code** (10 offline tests) to pass.
+2. Open **Actions → Alpaca Swing Engine → Run workflow**.
+3. Choose **replay** and **100** lookback days; this runs entirely without orders.
+4. Download the `alpaca-replay-<run id>` artifact and inspect
+   `replay_summary.json`, `data_coverage_by_day.csv`, `replay_equity_curve.csv`,
+   and `replay_trades.csv`.
+5. Share **just the nonsecret** `replay_summary.json` and the coverage CSV for
+   analysis. Do **not** enable paper orders from these results alone.
+
+The `data_quality_pass` flag is an **approximate coverage screen**, not
+certification. US-market holidays, early closes, and edge days may cause false
+warnings. An estimate below 80% or many gaps warrants investigation, especially
+when every symbol reports the same unexpectedly low bar count.
 
 **Purpose:** one repo-ready replacement for the earlier `engine.py` observation prototype. It runs on GitHub Actions using Alpaca **paper** trading only. It does not touch real money. It includes historical observation, a chronological replay, signal generation, capped order sizing, broker-managed bracket exits, restart-aware order reconciliation, an optional Google Sheets audit tab, and optional webhook notifications.
 
@@ -12,6 +52,7 @@ Unzip, then copy the following **entire contents** into the root of your existin
 alpaca-swing-trading/
 ├── engine.py
 ├── strategy.py
+├── data_audit.py
 ├── replay.py
 ├── requirements.txt
 ├── README.md
@@ -32,7 +73,7 @@ If using Terminal and you have the existing repository checked out:
 ```bash
 # Extract ZIP into Downloads, then run from inside your existing repo:
 cp -R ~/Downloads/alpaca_swing_complete/. .
-git add engine.py strategy.py replay.py requirements.txt README.md .gitignore tests reports .github/workflows
+git add engine.py strategy.py data_audit.py replay.py requirements.txt README.md .gitignore tests reports .github/workflows
  git commit -m "Consolidate Alpaca paper swing engine"
 git push
 ```
@@ -50,7 +91,7 @@ The copy command is illustrative; adjust the extracted folder's location. On Git
 
 1. Push all files to the **default branch**. Wait for `Validate Swing Code` to show green (offline unit tests).
 2. Open **Actions → Alpaca Swing Engine → Run workflow**.
-3. Select **`replay`**. When completed, open the downloadable `alpaca-replay-<run_id>` workflow artifact. It contains `replay_summary.json` and `replay_trades.csv`.
+3. Select **`replay`**. When completed, open the downloadable `alpaca-replay-<run_id>` workflow artifact. It contains `replay_summary.json`, `replay_trades.csv`, `replay_equity_curve.csv`, and `data_coverage_by_day.csv`.
 4. Run the workflow again choosing **`observe`**. It checks the latest historical candle, even if markets are closed.
 5. Keep paper execution disabled until you review the replay and Alpaca account contents. A green workflow is not proof that signals or fills are economically sound.
 
@@ -59,7 +100,7 @@ The copy command is illustrative; adjust the extracted folder's location. On Git
 | Mode | Data and behavior | Orders? |
 |------|-------------------|---------|
 | `observe` | Latest completed-looking IEX 5-minute bar; scans breakout and EMA pullback | Never |
-| `replay` | 45 calendar days of 5-minute bars; next-bar-open, OHLC assumptions | Never |
+| `replay` | Default 100 calendar days of 5-minute bars; next-bar-open, OHLC assumptions | Never |
 | `paper` | Fresh completed 5-minute bar, Alpaca open clock, risk & idempotency checks, GTC paper bracket | **Only after explicit approval switches** |
 | `report` | Alpaca paper account, positions, order states, optional Sheets + webhook | Never |
 
@@ -122,7 +163,7 @@ Paper order submission and certain critical alerts are sent immediately if confi
 - GitHub can **delay or drop** scheduled runs. Market data on the free **IEX** feed is a single exchange, not consolidated SIP. Signals/volumes can differ significantly from full-market data.
 - A 15-minute schedule can miss short-lived signals; no claim of high-frequency or continuously monitored execution. Bracket exits are handled by Alpaca's broker order service, subject to its order rules.
 - Your personal free GitHub Actions quota depends on account type/usage. Check **Settings → Billing → Actions**; not guaranteed unlimited free runs.
-- The 45-day replay uses Alpaca IEX candles, simplified next-bar fills, conservative stop-first OHLC ordering and a 0.1% simulated slippage per side. It ignores transaction costs, real spreads, volume impact and data survivorship. Results are **illustrative**, not evidence of alpha.
+- The historical replay uses Alpaca IEX candles, simplified next-bar fills, conservative stop-first OHLC ordering and a 0.1% simulated slippage per side. It ignores transaction costs, real spreads, volume impact and data survivorship. Results are **illustrative**, not evidence of alpha.
 
 ## Future work / explicitly NOT included
 
@@ -141,4 +182,6 @@ Paper order submission and certain critical alerts are sent immediately if confi
 - `Ambiguous order response`: inspect Alpaca for the deterministic client order ID before trying anything else; never manually duplicate a market order.
 - A green `observe` run after market close is normal and does **not** place trades.
 
-**Run `Validate Swing Code`, then `replay`, then `observe`. Orders should remain OFF until you deliberately approve paper execution.**
+**Do not enable paper orders until missing-bar coverage is reviewed, replay/live
+exit logic is aligned to the intended holding period, and performance is
+validated out of sample. Passing offline tests alone is not sufficient.**

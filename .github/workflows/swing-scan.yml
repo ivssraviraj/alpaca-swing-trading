@@ -13,6 +13,15 @@ on:
           - paper
           - report
         default: observe
+      replay_days:
+        description: 'Replay lookback, calendar days (replay mode only)'
+        type: choice
+        required: false
+        options:
+          - '100'
+          - '75'
+          - '45'
+        default: '100'
   # UTC envelope covers US regular sessions in EST and EDT.
   # Script checks Alpaca's clock and completed-bar freshness.
   # 15-min interval reduces cost; schedule is best-effort, NOT real-time.
@@ -37,6 +46,7 @@ jobs:
       PAPER_ONLY_ACK: ${{ vars.PAPER_ONLY_ACK || '' }}
       KILL_SWITCH: ${{ vars.KILL_SWITCH || 'false' }}
       STRATEGY_CAPITAL_USD: ${{ vars.STRATEGY_CAPITAL_USD || '25000' }}
+      REPLAY_DAYS: ${{ github.event_name == 'workflow_dispatch' && inputs.replay_days || '100' }}
       SYMBOLS: ${{ vars.SYMBOLS || 'SPY,QQQ,IWM,AAPL,MSFT,NVDA' }}
       GOOGLE_SHEET_ID: ${{ vars.GOOGLE_SHEET_ID || '' }}
       GOOGLE_SA_JSON_BASE64: ${{ secrets.GOOGLE_SA_JSON_BASE64 }}

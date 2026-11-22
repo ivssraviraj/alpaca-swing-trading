@@ -96,3 +96,42 @@ def test_unprotected_position_fails_closed():
                           avg_entry_price="100")
     with pytest.raises(RuntimeError, match="Unmanaged position"):
         managed_exposure([pos], [])
+
+
+def test_sparse_data_is_flagged(tmp_path):
+    from data_audit import session_coverage
+    bars, _ = samples(62)
+    summary = session_coverage({"AAPL": bars}, str(tmp_path))
+    assert summary["AAPL"]["status"] == "REVIEW_REQUIRED"
+    assert summary["AAPL"]["bars"] == 62
+    assert (tmp_path / "data_coverage_by_day.csv").exists()
+
+
+def test_replay_skips_stale_next_bar(tmp_path):
+    bars, daily = samples(62)
+    index = list(bars.index)
+    index[-1] = pd.Timestamp("2026-11-11 14:00", tz="America/New_York")
+    bars.index = pd.DatetimeIndex(index)
+    result = run_replay({"AAPL": bars}, {"AAPL": daily}, str(tmp_path))
+    assert result["entries"] == 0
+    assert result["stale_signal_skips"] == 1
+
+
+def test_replay_default_has_no_time_exit(tmp_path):
+    bars, daily = samples(63)
+    bars.iloc[62, bars.columns.get_loc("open")] = 132
+    bars.iloc[62, bars.columns.get_loc("high")] = 132.1
+    bars.iloc[62, bars.columns.get_loc("low")] = 131.9
+    bars.iloc[62, bars.columns.get_loc("close")] = 132
+    index = list(bars.index)
+    index[-1] = pd.Timestamp("2026-12-04 09:30", tz="America/New_York")
+    bars.index = pd.DatetimeIndex(index)
+    without_exit = run_replay({"AAPL": bars}, {"AAPL": daily}, str(tmp_path))
+    assert without_exit["entries"] == 1
+    assert without_exit["closed_trades"] == 0
+    assert without_exit["open_positions"] == ["AAPL"]
+    with_exit = run_replay({"AAPL": bars}, {"AAPL": daily}, str(tmp_path),
+                           time_exit_calendar_days=21)
+    assert with_exit["closed_trades"] == 1
+    assert with_exit["open_positions"] == []
+    assert with_exit["time_exit_calendar_days"] == 21
