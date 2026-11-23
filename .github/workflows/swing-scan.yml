@@ -1,73 +1,73 @@
 name: Alpaca Swing Engine
-
 on:
   workflow_dispatch:
     inputs:
       mode:
-        description: 'observe / replay / paper / report'
-        required: true
+        description: Explicit operating mode (paper-execute requires all configuration gates)
         type: choice
-        options:
-          - observe
-          - replay
-          - paper
-          - report
         default: observe
+        options: [observe, paper-dry-run, paper-execute, replay, weekly-report, check-alpaca, check-ai]
       replay_days:
-        description: 'Replay lookback, calendar days (replay mode only)'
-        type: choice
-        required: false
-        options:
-          - '100'
-          - '75'
-          - '45'
+        description: Calendar days for replay
+        type: string
         default: '100'
-  # UTC envelope covers US regular sessions in EST and EDT.
-  # Script checks Alpaca's clock and completed-bar freshness.
-  # 15-min interval reduces cost; schedule is best-effort, NOT real-time.
   schedule:
     - cron: '3,18,33,48 13-22 * * 1-5'
     - cron: '17 14 * * 6'
-
 permissions:
   contents: read
 concurrency:
-  group: alpaca-swing-execution
+  group: alpaca-swing-single-executor
   cancel-in-progress: false
-
 jobs:
   run:
     runs-on: ubuntu-latest
-    timeout-minutes: 12
+    environment: paper
+    timeout-minutes: 14
     env:
       APCA_API_KEY_ID: ${{ secrets.APCA_API_KEY_ID }}
       APCA_API_SECRET_KEY: ${{ secrets.APCA_API_SECRET_KEY }}
-      PAPER_ORDERS_ENABLED: ${{ vars.PAPER_ORDERS_ENABLED || 'false' }}
-      PAPER_ONLY_ACK: ${{ vars.PAPER_ONLY_ACK || '' }}
-      KILL_SWITCH: ${{ vars.KILL_SWITCH || 'false' }}
-      STRATEGY_CAPITAL_USD: ${{ vars.STRATEGY_CAPITAL_USD || '25000' }}
-      REPLAY_DAYS: ${{ github.event_name == 'workflow_dispatch' && inputs.replay_days || '100' }}
-      SYMBOLS: ${{ vars.SYMBOLS || 'SPY,QQQ,IWM,AAPL,MSFT,NVDA' }}
-      GOOGLE_SHEET_ID: ${{ vars.GOOGLE_SHEET_ID || '' }}
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      FINNHUB_API_KEY: ${{ secrets.FINNHUB_API_KEY }}
+      DATABASE_URL: ${{ secrets.DATABASE_URL }}
       GOOGLE_SA_JSON_BASE64: ${{ secrets.GOOGLE_SA_JSON_BASE64 }}
       ALERT_WEBHOOK_URL: ${{ secrets.ALERT_WEBHOOK_URL }}
+      PAPER_ORDERS_ENABLED: ${{ vars.PAPER_ORDERS_ENABLED || 'false' }}
+      PAPER_ONLY_ACK: ${{ vars.PAPER_ONLY_ACK || '' }}
+      EXECUTION_VALIDATED_ACK: ${{ vars.EXECUTION_VALIDATED_ACK || '' }}
+      IEX_EXECUTION_ACK: ${{ vars.IEX_EXECUTION_ACK || '' }}
+      KILL_SWITCH: ${{ vars.KILL_SWITCH || 'false' }}
+      STRATEGY_CAPITAL_USD: ${{ vars.STRATEGY_CAPITAL_USD || '25000' }}
+      AI_ENABLED: ${{ vars.AI_ENABLED || 'false' }}
+      OPENAI_MODEL: ${{ vars.OPENAI_MODEL || 'gpt-5.4' }}
+      AI_INPUT_USD_PER_MILLION: ${{ vars.AI_INPUT_USD_PER_MILLION || '2.5' }}
+      AI_OUTPUT_USD_PER_MILLION: ${{ vars.AI_OUTPUT_USD_PER_MILLION || '15' }}
+      AI_DAILY_BUDGET_USD: ${{ vars.AI_DAILY_BUDGET_USD || '1' }}
+      AI_MAX_CALLS_DAILY: ${{ vars.AI_MAX_CALLS_DAILY || '30' }}
+      DATA_FEED: ${{ vars.DATA_FEED || 'iex' }}
+      UNIVERSE_MODE: ${{ vars.UNIVERSE_MODE || 'dynamic' }}
+      UNIVERSE_SIZE: ${{ vars.UNIVERSE_SIZE || '100' }}
+      SYMBOLS: ${{ vars.SYMBOLS || 'SPY,QQQ,IWM,AAPL,MSFT,NVDA' }}
+      SHEETS_ENABLED: ${{ vars.SHEETS_ENABLED || 'false' }}
+      GOOGLE_SHEET_ID: ${{ vars.GOOGLE_SHEET_ID || '' }}
       ALERT_WEBHOOK_KIND: ${{ vars.ALERT_WEBHOOK_KIND || 'discord' }}
-      MODE: ${{ github.event_name == 'workflow_dispatch' && inputs.mode || (github.event.schedule == '17 14 * * 6' && 'report' || (vars.PAPER_ORDERS_ENABLED == 'true' && vars.PAPER_ONLY_ACK == 'YES_PAPER_ONLY' && vars.KILL_SWITCH != 'true' && 'paper' || 'observe')) }}
+      REPLAY_DAYS: ${{ inputs.replay_days || '100' }}
+      MODE: ${{ github.event_name == 'workflow_dispatch' && inputs.mode || (github.event.schedule == '17 14 * * 6' && 'weekly-report' || (vars.PAPER_ORDERS_ENABLED == 'true' && 'paper-execute' || 'observe')) }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          python-version: '3.12'
           cache: pip
-      - name: Install dependencies
-        run: pip install -r requirements.txt
-      - name: Run engine
-        run: python engine.py --mode "$MODE"
-      - name: Attach historical replay outputs
+      - name: Install pinned dependencies
+        run: pip install -r requirements.lock && pip install --no-deps -e .
+      - name: Run guarded engine
+        run: python -m trading_bot "$MODE" --days "$REPLAY_DAYS"
+      - name: Retain audit export (not critical state)
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: alpaca-replay-${{ github.run_id }}
+          name: alpaca-audit-${{ github.run_id }}
           path: reports/
           if-no-files-found: ignore
-          retention-days: 14
+          retention-days: 30

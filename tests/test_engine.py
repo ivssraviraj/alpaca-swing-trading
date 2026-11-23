@@ -5,30 +5,39 @@ from types import SimpleNamespace
 import pandas as pd
 import pytest
 
-from strategy import candidate_at, bar_is_fresh, shares_for_trade, current_reg_session
+from engine import managed_exposure, order_id, validate_paper_gate
 from replay import run_replay
-from engine import order_id, managed_exposure, validate_paper_gate
+from strategy import bar_is_fresh, candidate_at, shares_for_trade
 
 
 def samples(bar_count=62):
     # Daily data belongs to PREVIOUS days, not today: avoids look-ahead.
     dates = pd.date_range("2026-09-01", periods=45, freq="B", tz="America/New_York")
-    daily = pd.DataFrame({
-        "open": [100+i*.50 for i in range(len(dates))],
-        "high": [101+i*.50 for i in range(len(dates))],
-        "low": [99+i*.50 for i in range(len(dates))],
-        "close": [100+i*.50 for i in range(len(dates))],
-        "volume": [50000]*len(dates),
-    }, index=dates)
-    ts = pd.date_range("2026-11-10 09:30", periods=bar_count,
-                       freq="5min", tz="America/New_York")
+    daily = pd.DataFrame(
+        {
+            "open": [100 + i * 0.50 for i in range(len(dates))],
+            "high": [101 + i * 0.50 for i in range(len(dates))],
+            "low": [99 + i * 0.50 for i in range(len(dates))],
+            "close": [100 + i * 0.50 for i in range(len(dates))],
+            "volume": [50000] * len(dates),
+        },
+        index=dates,
+    )
+    ts = pd.date_range("2026-11-10 09:30", periods=bar_count, freq="5min", tz="America/New_York")
     price = [127.0] * bar_count
     price[60] = 131.0
     if bar_count > 61:
         price[61] = 131.1
-    df = pd.DataFrame({"open":price, "high":[p+.10 for p in price],
-                       "low":[p-.10 for p in price], "close":price,
-                       "volume":[100]*bar_count}, index=ts)
+    df = pd.DataFrame(
+        {
+            "open": price,
+            "high": [p + 0.10 for p in price],
+            "low": [p - 0.10 for p in price],
+            "close": price,
+            "volume": [100] * bar_count,
+        },
+        index=ts,
+    )
     df.iloc[60, df.columns.get_loc("volume")] = 300
     return df, daily
 
@@ -50,13 +59,40 @@ def test_signal_and_daily_filter():
 
 
 def test_sizing_never_exceeds_portfolio_bounds():
-    qty = shares_for_trade(Decimal("100"), Decimal("97"), Decimal("100000"),
-                           Decimal("100000"), Decimal(0), Decimal(0), 0)
+    qty = shares_for_trade(
+        Decimal("100"),
+        Decimal("97"),
+        Decimal("100000"),
+        Decimal("100000"),
+        Decimal(0),
+        Decimal(0),
+        0,
+    )
     assert 0 < qty <= 30  # 12% of capped $25k / $100 = 30 shares
-    assert shares_for_trade(Decimal("100"), Decimal("97"), Decimal("25000"),
-                            Decimal("25000"), Decimal(0), Decimal(0), 4) == 0
-    assert shares_for_trade(Decimal("100"), Decimal("97"), Decimal("25000"),
-                            Decimal("25000"), Decimal(0), Decimal("751"), 0) == 0
+    assert (
+        shares_for_trade(
+            Decimal("100"),
+            Decimal("97"),
+            Decimal("25000"),
+            Decimal("25000"),
+            Decimal(0),
+            Decimal(0),
+            4,
+        )
+        == 0
+    )
+    assert (
+        shares_for_trade(
+            Decimal("100"),
+            Decimal("97"),
+            Decimal("25000"),
+            Decimal("25000"),
+            Decimal(0),
+            Decimal("751"),
+            0,
+        )
+        == 0
+    )
 
 
 def test_replay_never_fills_last_signal(tmp_path):
@@ -92,14 +128,14 @@ def test_paper_orders_locked_without_both_flags(monkeypatch):
 
 
 def test_unprotected_position_fails_closed():
-    pos = SimpleNamespace(symbol="AAPL", side="long", qty="10",
-                          avg_entry_price="100")
+    pos = SimpleNamespace(symbol="AAPL", side="long", qty="10", avg_entry_price="100")
     with pytest.raises(RuntimeError, match="Unmanaged position"):
         managed_exposure([pos], [])
 
 
 def test_sparse_data_is_flagged(tmp_path):
     from data_audit import session_coverage
+
     bars, _ = samples(62)
     summary = session_coverage({"AAPL": bars}, str(tmp_path))
     assert summary["AAPL"]["status"] == "REVIEW_REQUIRED"
@@ -130,8 +166,9 @@ def test_replay_default_has_no_time_exit(tmp_path):
     assert without_exit["entries"] == 1
     assert without_exit["closed_trades"] == 0
     assert without_exit["open_positions"] == ["AAPL"]
-    with_exit = run_replay({"AAPL": bars}, {"AAPL": daily}, str(tmp_path),
-                           time_exit_calendar_days=21)
+    with_exit = run_replay(
+        {"AAPL": bars}, {"AAPL": daily}, str(tmp_path), time_exit_calendar_days=21
+    )
     assert with_exit["closed_trades"] == 1
     assert with_exit["open_positions"] == []
     assert with_exit["time_exit_calendar_days"] == 21

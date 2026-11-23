@@ -1,24 +1,22 @@
-
 name: Alpaca Connection Test
-
 on:
   workflow_dispatch:
-
+permissions:
+  contents: read
 jobs:
-  test:
+  read-only:
     runs-on: ubuntu-latest
+    environment: paper
+    timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
-
       - uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
-
-      - name: Install dependencies
-        run: pip install alpaca-py pandas
-
-      - name: Test Alpaca
+          python-version: '3.12'
+          cache: pip
+      - run: pip install -r requirements.lock && pip install --no-deps -e .
+      - name: Read-only account and data verification
         env:
           APCA_API_KEY_ID: ${{ secrets.APCA_API_KEY_ID }}
           APCA_API_SECRET_KEY: ${{ secrets.APCA_API_SECRET_KEY }}
-        run: python test_connection.py
+        run: python -m trading_bot check-alpaca
