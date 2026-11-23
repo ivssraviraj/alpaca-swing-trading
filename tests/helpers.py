@@ -52,6 +52,8 @@ def frames(count=61, outcome=None):
 def cfg(tmp_path, **overrides):
     values = dict(
         _env_file=None,
+        github_actions=False,
+        database_url="",
         state_path=tmp_path / "state.sqlite3",
         reports_dir=tmp_path / "reports",
         apca_api_key_id="fixture-key",
