@@ -7,6 +7,7 @@ from zoneinfo import ZoneInfo
 from alpaca.data.requests import NewsRequest
 
 from .calendar import NY, held_sessions
+from .diagnostics import emit, traced
 from .models import Event, News, fingerprint
 from .providers import BoundedSession, read_call
 
@@ -32,7 +33,9 @@ class EvidenceService:
             settings.request_timeout_seconds, settings.request_interval_seconds
         )
 
+    @traced("evidence.news")
     def news(self, symbol, now):
+        emit("news_requested", symbol=symbol, as_of=now, max_age_hours=self.cfg.news_max_age_hours)
         response = read_call(
             self.client.get_news,
             NewsRequest(
@@ -63,6 +66,13 @@ class EvidenceService:
             result.append(n)
         result.sort(key=lambda n: (n.published_at, n.id), reverse=True)
         # Fail rather than quietly ignoring unknown future/invalid news.
+        emit(
+            "news_received",
+            symbol=symbol,
+            response_items=len(response.data["news"]),
+            matching_items=len(result),
+            newest_published_at=result[0].published_at if result else None,
+        )
         validate_news(result, symbol, now, self.cfg.news_max_age_hours)
         result = result[:8]
         self.store.audit(
@@ -70,12 +80,19 @@ class EvidenceService:
         )
         return result
 
+    @traced("evidence.earnings_calendar")
     def calendar(self, now):
         key = "earnings-calendar:" + now.astimezone(ZoneInfo(NY)).strftime("%Y-%m-%dT%H")
         cached = self.store.get(key)
         if cached is not None:
+            emit("earnings_calendar_cache_hit", events=len(cached), as_of=now)
             return [Event.model_validate(e) for e in cached], True
         if not self.cfg.finnhub_api_key.get_secret_value():
+            emit(
+                "earnings_calendar_unavailable",
+                "WARNING",
+                reason="Finnhub credential not configured",
+            )
             return [], False
         response = read_call(
             self.http.get,
@@ -116,6 +133,14 @@ class EvidenceService:
                 )
             )
         self.store.put(key, [e.model_dump(mode="json") for e in events])
+        emit(
+            "earnings_calendar_received",
+            "INFO",
+            events=len(events),
+            lookback_days=10,
+            forward_days=30,
+            exact_release_times_verified=False,
+        )
         self.store.audit(
             "calendar_snapshot",
             {
@@ -127,8 +152,14 @@ class EvidenceService:
         )
         return events, True
 
+    @traced("evidence.macro_calendar")
     def macro(self, now):
         if not self.cfg.macro_calendar_enabled or not self.cfg.finnhub_api_key.get_secret_value():
+            emit(
+                "macro_calendar_skipped",
+                enabled=self.cfg.macro_calendar_enabled,
+                configured=bool(self.cfg.finnhub_api_key.get_secret_value()),
+            )
             return [], False
         key = "macro:" + now.date().isoformat()
         cached = self.store.get(key)

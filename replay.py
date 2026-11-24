@@ -16,6 +16,7 @@ import pandas as pd
 
 from data_audit import next_bar_eligible, session_coverage
 from strategy import Limits, Signal, candidate_at, shares_for_trade
+from trading_bot.diagnostics import emit, traced
 
 
 @dataclass
@@ -29,6 +30,7 @@ class ReplayPosition:
     setup: str
 
 
+@traced("legacy.replay")
 def run_replay(
     intraday: dict[str, pd.DataFrame],
     daily: dict[str, pd.DataFrame],
@@ -284,4 +286,5 @@ def run_replay(
         w.writeheader()
         w.writerows(equity_curve)
     (dest / "replay_summary.json").write_text(json.dumps(result, indent=2))
+    emit("legacy_replay_completed", "INFO", result=result)
     return result

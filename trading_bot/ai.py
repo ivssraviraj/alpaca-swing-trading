@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 
+from .diagnostics import emit, error_details, traced
 from .evidence import validate_news
 from .models import Approval, Decision, Evidence, fingerprint
 
@@ -32,7 +33,21 @@ def context_hash(events, symbol):
     return fingerprint(sorted(visible, key=lambda e: (e["id"], e["event_at"])))
 
 
+@traced("ai.validate_approval")
 def validate_approval(approval, candidate, news, now, settings, historical=False, events=()):
+    emit(
+        "approval_validation",
+        symbol=candidate.symbol,
+        signal_id=candidate.signal_id,
+        verdict=approval.decision.decision,
+        evaluated_at=approval.evaluated_at,
+        expires_at=approval.decision.approval_expires_at,
+        critical_risks=approval.decision.critical_risks,
+        missing_information=approval.decision.missing_information,
+        news_items=len(news),
+        events=len(events),
+        historical=historical,
+    )
     validate_news(
         news,
         candidate.symbol,
@@ -77,7 +92,19 @@ class AIService:
     def __init__(self, settings, store, client=None):
         self.cfg, self.store, self.client = settings, store, client
 
+    @traced("ai.evaluate")
     def evaluate(self, candidate, news, events, now):
+        emit(
+            "ai_review_requested",
+            "INFO",
+            symbol=candidate.symbol,
+            signal_id=candidate.signal_id,
+            setup=candidate.setup,
+            model=self.cfg.openai_model,
+            enabled=self.cfg.ai_enabled,
+            news_items=len(news),
+            events=len(events),
+        )
         if not self.cfg.ai_enabled:
             raise ValueError("AI disabled; entries cannot be approved")
         if self.cfg.github_actions and not self.store.postgres:
@@ -96,6 +123,12 @@ class AIService:
         if cached:
             approval = Approval.model_validate(cached)
             if now < approval.decision.approval_expires_at:
+                emit(
+                    "ai_cache_hit",
+                    symbol=candidate.symbol,
+                    verdict=approval.decision.decision,
+                    expires_at=approval.decision.approval_expires_at,
+                )
                 return approval
         package = json.dumps(
             {
@@ -108,6 +141,15 @@ class AIService:
         )
         if len(package.encode()) > self.cfg.ai_max_input_bytes:
             raise ValueError("AI evidence input budget exceeded")
+        emit(
+            "ai_evidence_ready",
+            symbol=candidate.symbol,
+            input_bytes=len(package.encode()),
+            max_input_bytes=self.cfg.ai_max_input_bytes,
+            candidate_hash=candidate_hash,
+            news_hash=news_hash,
+            event_hash=event_hash,
+        )
         if self.client is None:
             if not self.cfg.openai_api_key.get_secret_value():
                 raise ValueError("Missing OPENAI_API_KEY")
@@ -189,7 +231,5 @@ class AIService:
             self.store.put(key, approval.model_dump(mode="json"))
             return approval
         except Exception as exc:
-            self.store.audit(
-                "ai_failure", {"symbol": candidate.symbol, "error": type(exc).__name__}, now
-            )
+            self.store.audit("ai_failure", {"symbol": candidate.symbol, **error_details(exc)}, now)
             raise ValueError("AI failure; no approval") from None

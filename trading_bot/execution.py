@@ -15,6 +15,7 @@ from alpaca.trading.requests import (
 
 from .calendar import held_sessions
 from .config import PAPER_URL
+from .diagnostics import emit, error_details, traced
 from .models import Approval, Candidate, Event, News, Portfolio, fingerprint
 from .providers import read_call
 from .risk import plan_order
@@ -53,7 +54,15 @@ class Broker:
         if str(getattr(client, "_base_url", "")) != PAPER_URL:
             raise ValueError("Wrong trading endpoint: PAPER required")
 
+    @traced("broker.mutation_gate")
     def mutation_gate(self):
+        emit(
+            "mutation_gate",
+            mode=self.mode,
+            paper_orders_enabled=self.cfg.paper_orders_enabled,
+            kill_switch=self.cfg.kill_switch,
+            writer_locked=self.store.locked,
+        )
         self.cfg.execution_gate(self.mode)
         self.store.require_lock()
         if str(self.client._base_url) != PAPER_URL:
@@ -67,6 +76,12 @@ class Broker:
                 return None
             raise
 
+    @traced("broker.cancel_order")
+    def cancel_order(self, identifier):
+        emit("paper_order_cancellation", "INFO", order_id=str(identifier))
+        return self.client.cancel_order_by_id(identifier)
+
+    @traced("broker.order_history")
     def orders(self):
         from alpaca.common.enums import Sort
 
@@ -83,6 +98,7 @@ class Broker:
                 ),
             )
             recent.extend(page)
+            emit("order_history_page", page_number=_ + 1, returned=len(page), until=until)
             if len(page) < 500:
                 break
             oldest = min(o.submitted_at for o in page)
@@ -105,6 +121,7 @@ class Broker:
                     known.append(order)
         return flatten([*recent, *opened, *known])
 
+    @traced("broker.reconcile")
     def reconcile(self, now):
         self.store.require_lock()
         account = read_call(self.client.get_account)
@@ -231,6 +248,7 @@ class Broker:
         self.store.audit("portfolio", snapshot.model_dump(mode="json"), now)
         return snapshot
 
+    @traced("broker.record_fill")
     def record_fill(self, order, candidate, payload, now):
         qty, avg = float(order.filled_qty or 0), float(order.filled_avg_price or 0)
         if qty <= 0:
@@ -287,12 +305,27 @@ class Broker:
             self.store.execute("ROLLBACK")
             raise
 
+    @traced("broker.execute")
     def execute(self, candidate, approval, news, market, now, events, calendar_ok, correlations):
+        emit(
+            "execution_requested",
+            "INFO",
+            symbol=candidate.symbol,
+            signal_id=candidate.signal_id,
+            setup=candidate.setup,
+        )
         self.mutation_gate()
         if self.cfg.data_feed == "iex" and self.cfg.iex_execution_ack != "I_ACCEPT_IEX_LIMITATIONS":
             raise ValueError("IEX execution limitations must be explicitly acknowledged")
         current = self.reconcile(now)
         clock = read_call(self.client.get_clock)
+        emit(
+            "broker_clock",
+            open=clock.is_open,
+            timestamp=clock.timestamp,
+            next_close=clock.next_close,
+            as_of=now,
+        )
         if (
             not clock.is_open
             or abs((clock.timestamp - now).total_seconds()) > 90
@@ -322,8 +355,22 @@ class Broker:
             "events": [e.model_dump(mode="json") for e in events],
         }
         if self.by_client_id(candidate.signal_id) is not None:
+            emit(
+                "entry_duplicate_skipped",
+                "INFO",
+                symbol=candidate.symbol,
+                signal_id=candidate.signal_id,
+                source="broker",
+            )
             return None
         if not self.store.intent(candidate.signal_id, candidate.symbol, payload):
+            emit(
+                "entry_duplicate_skipped",
+                "INFO",
+                symbol=candidate.symbol,
+                signal_id=candidate.signal_id,
+                source="durable_intent",
+            )
             return None
         request = LimitOrderRequest(
             symbol=candidate.symbol,
@@ -348,7 +395,7 @@ class Broker:
                 raise ValueError("Entry acknowledgement disappeared")
             if active(latest):
                 try:
-                    self.client.cancel_order_by_id(latest.id)
+                    self.cancel_order(latest.id)
                 except Exception:
                     self.notify(
                         "safety",
@@ -363,6 +410,7 @@ class Broker:
         )
         return result
 
+    @traced("broker.submit_once")
     def submit_once(self, request, now):
         self.mutation_gate()
         intent = next((i for i in self.store.intents() if i["id"] == request.client_order_id), None)
@@ -394,6 +442,15 @@ class Broker:
             ):
                 raise ValueError("Order differs from deterministic approved plan")
         try:
+            emit(
+                "paper_order_submission",
+                "INFO",
+                symbol=request.symbol,
+                client_order_id=request.client_order_id,
+                side=text(request.side),
+                quantity=float(request.qty),
+                order_type=text(request.type),
+            )
             result = self.client.submit_order(order_data=request)
             self.store.mark_intent(request.client_order_id, text(result.status))
             self.store.audit(
@@ -406,12 +463,25 @@ class Broker:
                 now,
             )
             return result
-        except Exception:
+        except Exception as exc:
+            emit(
+                "paper_submission_ambiguous",
+                "ERROR",
+                symbol=request.symbol,
+                client_order_id=request.client_order_id,
+                **error_details(exc),
+            )
             self.store.mark_intent(request.client_order_id, "AMBIGUOUS")
             # Read by deterministic ID before any further action. Never resubmit.
             try:
                 found = self.by_client_id(request.client_order_id)
                 if found is not None:
+                    emit(
+                        "ambiguous_submission_recovered",
+                        "INFO",
+                        client_order_id=request.client_order_id,
+                        status=text(found.status),
+                    )
                     self.store.mark_intent(request.client_order_id, text(found.status))
                     return found
             except Exception:
@@ -423,9 +493,11 @@ class Broker:
             )
             raise ValueError("Ambiguous paper submission; entries frozen") from None
 
+    @traced("broker.manage_positions")
     def manage(self, now, events=(), daily=None):
         snapshot = self.reconcile(now)
         if self.mode != "paper-execute":
+            emit("position_mutations_skipped", mode=self.mode, reason="non_execution_mode")
             return snapshot
         self.mutation_gate()  # kill switch intentionally does not gate exits
         for reason in snapshot.reasons:
@@ -444,7 +516,7 @@ class Broker:
                 and active(order)
                 and now >= c.expires_at
             ):
-                self.client.cancel_order_by_id(order.id)
+                self.cancel_order(order.id)
         for pos in self.positions:
             c = self.candidates.get(pos.symbol)
             if not c or abs(self.ledger_qty.get(pos.symbol, 0) - float(pos.qty)) > 1e-6:
@@ -497,8 +569,10 @@ class Broker:
                 self.recover(pos.symbol, c, now, close=due or event_exit or breakdown)
         return self.reconcile(now)
 
+    @traced("broker.recover_position")
     def recover(self, symbol, candidate, now, close=False):
         """Cancel group, wait for terminal state, reread actual position; never oversell."""
+        emit("position_recovery_requested", "WARNING", symbol=symbol, close=close)
         self.mutation_gate()
         clock = read_call(self.client.get_clock)
         if not clock.is_open:
@@ -516,7 +590,7 @@ class Broker:
         for order in owned_open:
             current = read_call(self.client.get_order_by_id, order.id)
             if active(current) and text(current.status) != "pending_cancel":
-                self.client.cancel_order_by_id(current.id)
+                self.cancel_order(current.id)
         fresh = self.orders()
         if any(o.symbol == symbol and active(o) for o in fresh):
             return  # cancellation asynchronous; next invocation reconciles

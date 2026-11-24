@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import timedelta
 
 from .calendar import held_sessions
+from .diagnostics import emit, traced
 from .models import Candidate
 from .signals import prior_daily
 
@@ -23,9 +24,13 @@ def pending_rejections(store, now):
     return list(unique.values())[-1000:]
 
 
+@traced("observation.markouts")
 def capture_markouts(store, daily, now):
-    for c in pending_rejections(store, now):
+    pending = pending_rejections(store, now)
+    emit("markouts_pending", candidates=len(pending), daily_symbols=len(daily), as_of=now)
+    for c in pending:
         if c.symbol not in daily:
+            emit("markout_skipped", symbol=c.symbol, reason="missing_daily_data")
             continue
         history = prior_daily(daily[c.symbol], now)
         for horizon in (5, 15):

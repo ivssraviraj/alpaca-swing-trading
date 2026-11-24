@@ -83,6 +83,11 @@ Daily universe discovery can require hundreds of API pages. Synthetic CPU timing
 are not API throughput benchmarks. Start with `UNIVERSE_MODE=static` and the six
 existing symbols for connectivity verification, then expand deliberately.
 
+Debug logging is enabled by default across workflows. Actions run summaries show the
+scan funnel and rejection reasons; the audit artifact includes `runtime.jsonl` and
+per-symbol `scan_diagnostics.json`. See [debugging a workflow run](OPERATIONS.md#debugging-a-workflow-run)
+for interpreting overlapping checks, fixing sector mappings, and reducing verbosity later.
+
 Alpaca news supplies timestamped excerpts. Optional Finnhub calendars require your
 entitlement; no consensus, exact release chronology, SEC filing access, or analyst
 revision is invented. Historical AI evaluation needs forward-captured records.

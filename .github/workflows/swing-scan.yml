@@ -49,6 +49,10 @@ jobs:
       UNIVERSE_SIZE: ${{ vars.UNIVERSE_SIZE || '100' }}
       SYMBOLS: ${{ vars.SYMBOLS || 'SPY,QQQ,IWM,AAPL,MSFT,NVDA' }}
       SHEETS_ENABLED: ${{ vars.SHEETS_ENABLED || 'false' }}
+      LOG_LEVEL: ${{ vars.LOG_LEVEL || 'DEBUG' }}
+      DEBUG_TRACES_ENABLED: ${{ vars.DEBUG_TRACES_ENABLED || 'true' }}
+      SECTOR_MAP_PATH: ${{ vars.SECTOR_MAP_PATH || '' }}
+      PYTHONUNBUFFERED: '1'
       GOOGLE_SHEET_ID: ${{ vars.GOOGLE_SHEET_ID || '' }}
       ALERT_WEBHOOK_KIND: ${{ vars.ALERT_WEBHOOK_KIND || 'discord' }}
       REPLAY_DAYS: ${{ inputs.replay_days || '100' }}
@@ -63,6 +67,9 @@ jobs:
         run: pip install -r requirements.lock && pip install --no-deps -e .
       - name: Run guarded engine
         run: python -m trading_bot "$MODE" --days "$REPLAY_DAYS"
+      - name: Summarize scan and failures
+        if: always()
+        run: python scripts/write_run_summary.py
       - name: Retain audit export (not critical state)
         if: always()
         uses: actions/upload-artifact@v4

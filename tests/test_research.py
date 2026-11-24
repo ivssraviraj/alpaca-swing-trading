@@ -36,6 +36,28 @@ def test_no_fabricated_historical_ai(tmp_path):
     assert result["status"] == "UNAVAILABLE"
 
 
+def test_replay_diagnostics_preserve_results_and_bound_examples(tmp_path):
+    intra, daily = fixture_frames(FIXTURES / "market.json")
+    quiet = next(iter(intra.values())).copy()
+    quiet[["open", "close"]] = 127.0
+    quiet["high"], quiet["low"], quiet["volume"] = 127.1, 126.9, 10000
+    intra["QUIET"] = quiet
+    daily["QUIET"] = next(iter(daily.values())).copy()
+    archive = json.loads((FIXTURES / "events.json").read_text())
+    settings = cfg(tmp_path)
+    detailed = replay(intra, daily, settings, archive=archive)
+    compact_settings = settings.model_copy(
+        update={"debug_traces_enabled": False, "reports_dir": tmp_path / "compact"}
+    )
+    assert replay(intra, daily, compact_settings, archive=archive) == detailed
+    examples = json.loads((settings.reports_dir / "replay_scan_examples.json").read_text())
+    assert examples and set(examples) == set(detailed["scanner_rejection_counts"])
+    for reason, rows in examples.items():
+        assert 1 <= len(rows) <= 3
+        assert all(r["first_failure"] == reason and "symbol" in r and "as_of" in r for r in rows)
+    assert not (compact_settings.reports_dir / "replay_scan_examples.json").exists()
+
+
 def test_historical_event_published_later_cannot_select_candidate(tmp_path):
     intra, daily = fixture_frames(FIXTURES / "market.json")
     event = dict(

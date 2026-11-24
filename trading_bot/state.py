@@ -9,14 +9,18 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
+from .diagnostics import audit_summary, emit, run_id, safe_value, traced
 from .models import fingerprint
 
 
 class Store:
-    def __init__(self, path: Path, database_url: str = ""):
+    @traced("state.connect")
+    def __init__(self, path: Path, database_url: str = "", debug_traces_enabled=True):
         self.path = path
         self.postgres = bool(database_url)
         self.locked = False
+        self.debug_traces_enabled = debug_traces_enabled
+        emit("state_backend", backend="postgresql" if database_url else "sqlite")
         if database_url:
             import psycopg
 
@@ -43,6 +47,7 @@ class Store:
         handle = None
         acquired = False
         try:
+            emit("writer_lock_requested", backend="postgresql" if self.postgres else "sqlite")
             if self.postgres:
                 acquired = self.execute("SELECT pg_try_advisory_lock(714209331)").fetchone()[0]
             else:
@@ -53,8 +58,10 @@ class Store:
                 except BlockingIOError:
                     pass
             if not acquired:
+                emit("writer_lock_busy", "WARNING")
                 raise RuntimeError("Another trading invocation holds the writer lock")
             self.locked = True
+            emit("writer_lock_acquired")
             yield self
         finally:
             self.locked = False
@@ -62,6 +69,7 @@ class Store:
                 self.execute("SELECT pg_advisory_unlock(714209331)")
             if handle:
                 handle.close()
+            emit("writer_lock_released", acquired=acquired)
 
     def require_lock(self):
         if not self.locked:
@@ -94,7 +102,25 @@ class Store:
                 json.dumps(payload, default=str, sort_keys=True),
             ),
         )
+        level = (
+            "WARNING"
+            if "failure" in kind
+            or "warning" in kind
+            or kind in {"candidate_rejected", "entry_freeze"}
+            else "INFO"
+        )
+        emit(
+            "audit." + kind,
+            level,
+            audit_id=identifier,
+            audit_at=at,
+            details=audit_summary(kind, payload),
+        )
         return identifier
+
+    def trace(self, kind, payload, at=None):
+        if self.debug_traces_enabled:
+            self.audit(kind, safe_value({**payload, "run_id": run_id()}), at)
 
     def events(self, kind=None):
         rows = self.execute(
@@ -129,19 +155,43 @@ class Store:
         value = self.get(key, {"reserved_usd": 0.0, "calls": 0})
         last = self.get("ai:last_call")
         if last and (now - datetime.fromisoformat(last)).total_seconds() < interval:
+            emit(
+                "ai_budget_blocked",
+                "WARNING",
+                reason="minimum_call_interval",
+                minimum_seconds=interval,
+            )
             return False
         if value["calls"] >= max_calls or value["reserved_usd"] + amount > max_cost:
+            emit(
+                "ai_budget_blocked",
+                "WARNING",
+                reason="daily_limit",
+                used=value,
+                requested_usd=amount,
+                max_cost=max_cost,
+                max_calls=max_calls,
+            )
             return False
         # Pessimistic reservation is deliberately never refunded after timeout.
         value["calls"] += 1
         value["reserved_usd"] += amount
         self.put(key, value)
         self.put("ai:last_call", now.isoformat())
+        emit(
+            "ai_budget_reserved",
+            reservation_usd=amount,
+            daily_usage=value,
+            max_cost=max_cost,
+            max_calls=max_calls,
+        )
         return True
 
+    @traced("state.export")
     def export(self, directory):
         directory.mkdir(parents=True, exist_ok=True)
-        (directory / "audit.jsonl").write_text("".join(json.dumps(r) + "\n" for r in self.events()))
+        events = self.events()
+        (directory / "audit.jsonl").write_text("".join(json.dumps(r) + "\n" for r in events))
         records = self.events("research_record")
         archive = {
             "provenance": "Forward runtime records; no generated historical approvals",
@@ -165,7 +215,14 @@ class Store:
         archive["events"] = list(event_map.values())
         archive["calendar_snapshots"] = [e["payload"] for e in self.events("calendar_snapshot")]
         (directory / "forward_archive.json").write_text(json.dumps(archive, indent=2))
-        return fingerprint(self.events())
+        emit(
+            "audit_exported",
+            "INFO",
+            audit_events=len(events),
+            approvals=len(archive["approvals"]),
+            calendar_snapshots=len(archive["calendar_snapshots"]),
+        )
+        return fingerprint(events)
 
     def close(self):
         self.db.close()

@@ -1,4 +1,25 @@
-# Local validation — November 22, 2026
+# Logging update validation — November 24, 2026
+
+**138 offline tests passed** in 4.02 seconds on Python 3.12.16; application statement
+coverage is **86%**. This adds 19 regression cases covering diagnostic accuracy,
+accepted/rejected scanner parity, AI rejection stages, credential/body redaction,
+logging failures, run correlation, debug-off behavior, configuration failures,
+replay examples and sector-cache/artifact behavior.
+
+Lint, formatting, scoped mypy, workflow structure checks, secret-pattern checks and
+diff whitespace checks passed. An isolated offline CLI replay/comparison also passed:
+two synthetic technical trades, three cost scenarios, AI correctly unavailable
+without archived approvals, one correlated runtime log and a generated run summary.
+
+The updated scanner was compared with the pre-change scanner on the cached
+100-symbol snapshot from the November 24 observation. Every candidate result was
+identical. New diagnostics reported 50 first rejections on stop distance, 21 on net
+reward/risk, 28 with no matching setup and one recent-bar gap. Separately, all nine
+pattern pass counts were zero. This verifies logging against that snapshot, not
+strategy profitability or future behavior. No broker orders, paid AI calls, webhook
+messages or Sheets writes were made during this update's verification.
+
+## Previous baseline — November 22, 2026
 
 Final offline result: **119 passed**, no warnings, in **4.16 seconds** on this Mac
 with Python **3.12.16**. Application statement coverage: **84%** (1,502/1,788

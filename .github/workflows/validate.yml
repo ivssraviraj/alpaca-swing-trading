@@ -22,6 +22,9 @@ jobs:
       - run: python -m pytest --cov=trading_bot --cov-report=term-missing
       - run: python -m trading_bot replay --fixture tests/fixtures/market.json --archive tests/fixtures/events.json
       - run: python scripts/check_workflows.py
+      - name: Summarize fixture replay
+        if: always()
+        run: python scripts/write_run_summary.py
       - uses: actions/upload-artifact@v4
         if: always()
         with:

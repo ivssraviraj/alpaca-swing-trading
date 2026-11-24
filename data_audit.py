@@ -14,9 +14,12 @@ from typing import Mapping
 
 import pandas as pd
 
+from trading_bot.diagnostics import emit, traced
+
 REGULAR_BARS_PER_SESSION = 78
 
 
+@traced("legacy.data_coverage")
 def session_coverage(frames: Mapping[str, pd.DataFrame], output_dir: str) -> dict:
     dest = Path(output_dir)
     dest.mkdir(parents=True, exist_ok=True)
@@ -90,6 +93,7 @@ def session_coverage(frames: Mapping[str, pd.DataFrame], output_dir: str) -> dic
         )
         writer.writeheader()
         writer.writerows(daily_rows)
+    emit("legacy_coverage_completed", symbols=len(frames), coverage=result)
     return result
 
 

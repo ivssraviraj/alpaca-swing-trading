@@ -19,4 +19,18 @@ jobs:
         env:
           APCA_API_KEY_ID: ${{ secrets.APCA_API_KEY_ID }}
           APCA_API_SECRET_KEY: ${{ secrets.APCA_API_SECRET_KEY }}
+          DATA_FEED: ${{ vars.DATA_FEED || 'iex' }}
+          LOG_LEVEL: ${{ vars.LOG_LEVEL || 'DEBUG' }}
+          DEBUG_TRACES_ENABLED: ${{ vars.DEBUG_TRACES_ENABLED || 'true' }}
+          PYTHONUNBUFFERED: '1'
         run: python -m trading_bot check-alpaca
+      - name: Summarize connection check
+        if: always()
+        run: python scripts/write_run_summary.py
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: alpaca-connection-${{ github.run_id }}
+          path: reports/
+          if-no-files-found: ignore
+          retention-days: 30

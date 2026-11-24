@@ -79,6 +79,8 @@ Malformed typed values and unsafe endpoints fail closed. Run `python -m trading_
 | `ALERT_WEBHOOK_URL` | `""` | Optional HTTPS incoming webhook destination; secret. |
 | `ALERT_WEBHOOK_KIND` | `"discord"` | discord uses content; slack uses text. |
 | `REPORTS_DIR` | `"reports"` | Local audit/replay/report export directory; artifacts may contain private trading history. |
+| `LOG_LEVEL` | `"DEBUG"` | Structured console/runtime.jsonl verbosity; DEBUG by default. No HTTP headers, bodies or credentials are logged. |
+| `DEBUG_TRACES_ENABLED` | `true` | Persist per-symbol scanner metrics and workflow traces. Set false with LOG_LEVEL=INFO to reduce diagnostics later; normal audit and safety events remain. |
 | `SMOKE_TEST_NOTIONAL_CAP` | `50` | Paper smoke-test cap, maximum $100; all normal approval/risk gates still apply. |
 
 ## Usage notes

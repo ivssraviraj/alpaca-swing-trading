@@ -4,15 +4,32 @@ import argparse
 import json
 import subprocess
 import sys
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from pydantic import ValidationError
 
 from .config import Settings
+from .diagnostics import configure, emit, error_details, traced
 
 
 def main(argv=None):
+    started = time.monotonic()
+    code = 1
+    try:
+        code = _main(argv)
+        return code
+    finally:
+        emit(
+            "run_finished",
+            "INFO" if code == 0 else "ERROR",
+            exit_code=code,
+            elapsed_seconds=round(time.monotonic() - started, 3),
+        )
+
+
+def _main(argv=None):
     parser = argparse.ArgumentParser(description="Paper-only AI-reviewed swing trading")
     parser.add_argument(
         "mode",
@@ -39,9 +56,13 @@ def main(argv=None):
     )
     args = parser.parse_args(argv)
     if args.mode == "test":
+        configure(Settings.model_construct(), args.mode)
         return subprocess.call([sys.executable, "-m", "pytest"])
+    configured = False
     try:
         cfg = Settings()
+        configure(cfg, args.mode)
+        configured = True
         if args.mode == "validate-config":
             print(
                 json.dumps(
@@ -90,9 +111,24 @@ def main(argv=None):
             cfg.execution_gate("paper-execute")
             args.mode = "paper-execute"
         trading, market, news = clients(cfg)
-        store = Store(cfg.state_path, cfg.database_url.get_secret_value())
+        store = Store(
+            cfg.state_path,
+            cfg.database_url.get_secret_value(),
+            debug_traces_enabled=cfg.debug_traces_enabled,
+        )
         try:
             with store.writer():
+                store.trace(
+                    "workflow_started",
+                    {
+                        "mode": args.mode,
+                        "feed": cfg.data_feed,
+                        "universe_mode": cfg.universe_mode,
+                        "universe_size": cfg.universe_size,
+                        "ai_enabled": cfg.ai_enabled,
+                        "paper_orders_enabled": cfg.paper_orders_enabled,
+                    },
+                )
                 data = MarketData(market, cfg, store)
                 now = datetime.now(timezone.utc)
                 if args.mode == "check-alpaca":
@@ -100,6 +136,15 @@ def main(argv=None):
                     frames = data.bars(["SPY"], now - timedelta(days=7), now)
                     if not frames or frames["SPY"].empty:
                         raise ValueError("No market data returned for configured feed")
+                    emit(
+                        "alpaca_connectivity_passed",
+                        "INFO",
+                        paper=True,
+                        account_status=str(account.status),
+                        market_open=clock.is_open,
+                        bars=len(frames["SPY"]),
+                        feed=cfg.data_feed,
+                    )
                     print(
                         json.dumps(
                             {
@@ -154,6 +199,14 @@ def main(argv=None):
                 store.close()
         return 0
     except ValidationError as exc:
+        if not configured:
+            # Defaults only: do not read the invalid environment again or log its values.
+            configure(Settings.model_construct(), args.mode)
+        emit(
+            "configuration_or_schema_failure",
+            "ERROR",
+            fields=[".".join(map(str, e["loc"])) for e in exc.errors(include_input=False)],
+        )
         # Do not print Pydantic input values: configuration may contain secrets.
         print(
             json.dumps(
@@ -166,23 +219,27 @@ def main(argv=None):
         )
         return 2
     except Exception as exc:
+        details = error_details(exc)
+        emit("workflow_failed", "ERROR", **details)
         # Provider exceptions can include URLs/headers; print no exception payload.
         print(
             json.dumps(
                 {
                     "status": "BLOCKED" if isinstance(exc, ValueError) else "FAIL_CLOSED",
                     "error_type": type(exc).__name__,
-                    "reason": str(exc)
-                    if isinstance(exc, ValueError)
-                    else "Provider/runtime failure; inspect safe audit",
+                    "reason": details.get(
+                        "reason", "Provider/runtime failure; inspect runtime.jsonl"
+                    ),
                 }
             )
         )
         return 2
 
 
+@traced("workflow.check_ai")
 def check_ai(cfg):
     if not cfg.openai_api_key.get_secret_value():
+        emit("ai_connectivity_blocked", "WARNING", reason="Missing OPENAI_API_KEY")
         print(json.dumps({"status": "BLOCKED", "reason": "Missing OPENAI_API_KEY"}))
         return 2
     if cfg.github_actions and not cfg.database_url.get_secret_value():
@@ -192,9 +249,14 @@ def check_ai(cfg):
     from .models import Decision
     from .state import Store
 
-    store = Store(cfg.state_path, cfg.database_url.get_secret_value())
+    store = Store(
+        cfg.state_path,
+        cfg.database_url.get_secret_value(),
+        debug_traces_enabled=cfg.debug_traces_enabled,
+    )
     try:
         with store.writer():
+            store.trace("workflow_started", {"mode": "check-ai", "model": cfg.openai_model})
             now = datetime.now(timezone.utc)
             prompt = (
                 "Connectivity test only. Synthetic ticker TEST; no verified news. "
@@ -245,5 +307,8 @@ def check_ai(cfg):
             )
             print(json.dumps({"status": "PASS", "model": cfg.openai_model, "usage": usage}))
     finally:
-        store.close()
+        try:
+            store.export(cfg.reports_dir)
+        finally:
+            store.close()
     return 0

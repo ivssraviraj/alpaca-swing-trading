@@ -84,6 +84,8 @@ class Settings(BaseSettings):
     alert_webhook_url: SecretStr = SecretStr("")
     alert_webhook_kind: Literal["discord", "slack"] = "discord"
     reports_dir: Path = Path("reports")
+    log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR"] = "DEBUG"
+    debug_traces_enabled: bool = True
     smoke_test_notional_cap: float = Field(50, gt=0, le=100)
 
     @model_validator(mode="after")

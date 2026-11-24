@@ -81,6 +81,8 @@ notes = {
     "alert_webhook_url": "Optional HTTPS incoming webhook destination; secret.",
     "alert_webhook_kind": "discord uses content; slack uses text.",
     "reports_dir": "Local audit/replay/report export directory; artifacts may contain private trading history.",
+    "log_level": "Structured console/runtime.jsonl verbosity; DEBUG by default. No HTTP headers, bodies or credentials are logged.",
+    "debug_traces_enabled": "Persist per-symbol scanner metrics and workflow traces. Set false with LOG_LEVEL=INFO to reduce diagnostics later; normal audit and safety events remain.",
     "smoke_test_notional_cap": "Paper smoke-test cap, maximum $100; all normal approval/risk gates still apply.",
 }
 rows = [

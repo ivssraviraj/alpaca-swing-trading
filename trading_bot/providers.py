@@ -5,6 +5,7 @@ from __future__ import annotations
 import random
 import time
 from datetime import timedelta
+from urllib.parse import urlsplit
 
 import pandas as pd
 import requests
@@ -17,6 +18,7 @@ from alpaca.trading.client import TradingClient
 
 from .calendar import regular_completed
 from .config import PAPER_URL
+from .diagnostics import emit, error_details, register_secrets, traced
 from .models import Quote
 
 
@@ -32,7 +34,28 @@ class BoundedSession(requests.Session):
         self.last = time.monotonic()
         kwargs.setdefault("timeout", self.timeout)
         kwargs["allow_redirects"] = False
-        return super().request(method, url, **kwargs)
+        started = time.monotonic()
+        emit("http_request", method=method, host=urlsplit(url).hostname, timeout=kwargs["timeout"])
+        try:
+            response = super().request(method, url, **kwargs)
+        except Exception as exc:
+            emit(
+                "http_failure",
+                "WARNING",
+                method=method,
+                host=urlsplit(url).hostname,
+                elapsed_ms=round((time.monotonic() - started) * 1000, 2),
+                **error_details(exc),
+            )
+            raise
+        emit(
+            "http_response",
+            method=method,
+            host=urlsplit(url).hostname,
+            status=getattr(response, "status_code", None),
+            elapsed_ms=round((time.monotonic() - started) * 1000, 2),
+        )
+        return response
 
 
 def bounded(client, settings):
@@ -45,10 +68,28 @@ def bounded(client, settings):
 
 
 def read_call(fn, *args, **kwargs):
+    operation = getattr(fn, "__qualname__", type(fn).__name__)
     for attempt in range(3):
+        started = time.monotonic()
+        emit("provider_read_started", operation=operation, attempt=attempt + 1)
         try:
-            return fn(*args, **kwargs)
+            result = fn(*args, **kwargs)
+            emit(
+                "provider_read_completed",
+                operation=operation,
+                attempt=attempt + 1,
+                elapsed_ms=round((time.monotonic() - started) * 1000, 2),
+            )
+            return result
         except Exception as exc:
+            emit(
+                "provider_read_failed",
+                "WARNING",
+                operation=operation,
+                attempt=attempt + 1,
+                elapsed_ms=round((time.monotonic() - started) * 1000, 2),
+                **error_details(exc),
+            )
             code = getattr(exc, "status_code", None)
             response = getattr(exc, "response", None)
             if response is not None:
@@ -63,10 +104,17 @@ def read_call(fn, *args, **kwargs):
                 delay = min(30, max(float(retry_after), 2**attempt + random.random()))
             except ValueError:
                 delay = 2**attempt + random.random()
+            emit(
+                "provider_retry_scheduled",
+                operation=operation,
+                next_attempt=attempt + 2,
+                delay_seconds=delay,
+            )
             time.sleep(delay)
 
 
 def clients(settings):
+    register_secrets(settings)
     settings.require_broker_credentials()
     key, secret = (
         settings.apca_api_key_id.get_secret_value(),
@@ -88,9 +136,19 @@ class MarketData:
     def __init__(self, client, settings, store):
         self.client, self.cfg, self.store = client, settings, store
 
+    @traced("market_data.bars")
     def bars(self, symbols, start, end, daily=False):
         result, missing = {}, []
-        for batch in batches(symbols, self.cfg.batch_size):
+        for batch_number, batch in enumerate(batches(symbols, self.cfg.batch_size), 1):
+            emit(
+                "market_batch_requested",
+                batch=batch_number,
+                symbols=batch,
+                start=start,
+                end=end,
+                timeframe="1Day" if daily else "5Min",
+                feed=self.cfg.data_feed,
+            )
             request = StockBarsRequest(
                 symbol_or_symbols=batch,
                 timeframe=TimeFrame.Day if daily else TimeFrame(5, TimeFrameUnit.Minute),
@@ -125,9 +183,24 @@ class MarketData:
                     else:
                         frame = regular_completed(frame, end)
                     result[symbol] = frame
+                emit(
+                    "market_batch_completed",
+                    batch=batch_number,
+                    returned=[s for s in batch if s in result],
+                    missing=[s for s in batch if s not in result],
+                    bars={s: len(result[s]) for s in batch if s in result},
+                )
             except Exception as exc:
                 missing.extend(batch)
-                self.store.audit("data_failure", {"symbols": batch, "error": type(exc).__name__})
+                self.store.audit(
+                    "data_failure",
+                    {
+                        "symbols": batch,
+                        "batch": batch_number,
+                        "timeframe": "1Day" if daily else "5Min",
+                        **error_details(exc),
+                    },
+                )
         self.store.audit(
             "coverage",
             {
@@ -140,6 +213,7 @@ class MarketData:
         )
         return result
 
+    @traced("market_data.daily")
     def daily(self, symbols, now):
         # A daily cache is reusable only within the same NY date and feed.
         key = (
@@ -150,12 +224,21 @@ class MarketData:
         )
         cached = self.store.get(key, {})
         missing = [s for s in symbols if s not in cached]
+        emit(
+            "daily_cache",
+            requested=len(symbols),
+            hits=len(symbols) - len(missing),
+            misses=len(missing),
+            feed=self.cfg.data_feed,
+            as_of=now,
+        )
         if missing:
             fetched = self.bars(missing, now - timedelta(days=130), now, daily=True)
             cached.update({s: encode_frame(f) for s, f in fetched.items()})
             self.store.put(key, cached)
         return {s: decode_frame(cached[s]) for s in symbols if s in cached}
 
+    @traced("market_data.intraday")
     def intraday(self, symbols, now):
         key = (
             "intraday:"
@@ -193,18 +276,28 @@ class MarketData:
         )
         return result
 
+    @traced("market_data.quote")
     def quote(self, symbol):
         raw = read_call(
             self.client.get_stock_latest_quote,
             StockLatestQuoteRequest(symbol_or_symbols=[symbol], feed=DataFeed(self.cfg.data_feed)),
         )[symbol]
-        return Quote(
+        quote = Quote(
             symbol=symbol,
             bid=raw.bid_price,
             ask=raw.ask_price,
             at=raw.timestamp,
             feed=self.cfg.data_feed,
         )
+        emit(
+            "quote_received",
+            symbol=symbol,
+            bid=quote.bid,
+            ask=quote.ask,
+            quote_at=quote.at,
+            feed=quote.feed,
+        )
+        return quote
 
 
 def encode_frame(frame):

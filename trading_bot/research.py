@@ -12,6 +12,7 @@ import pandas as pd
 
 from .ai import validate_approval
 from .calendar import coverage, held_sessions, regular_completed
+from .diagnostics import emit, safe_value, traced
 from .models import Approval, Candidate, Event, News, Portfolio, Quote
 from .pipeline import correlations
 from .risk import size_candidate
@@ -26,7 +27,19 @@ class SimPosition:
     opened: pd.Timestamp
 
 
+@traced("research.replay")
 def replay(intraday, daily, settings, mode="technical", archive=None):
+    emit(
+        "replay_started",
+        "INFO",
+        strategy=mode,
+        symbols=list(intraday),
+        intraday_bar_count=sum(len(f) for f in intraday.values()),
+        slippage_bps=settings.slippage_bps,
+        spread_bps=settings.spread_bps,
+        fee_per_share=settings.fee_per_share,
+        calendar_required=settings.require_event_calendar,
+    )
     archive = archive or {}
     directory = settings.reports_dir
     directory.mkdir(parents=True, exist_ok=True)
@@ -37,6 +50,7 @@ def replay(intraday, daily, settings, mode="technical", archive=None):
             "reason": "No point-in-time event/news/AI archive; no invented approvals",
         }
         (directory / f"{mode}_summary.json").write_text(json.dumps(result, indent=2))
+        emit("replay_unavailable", "WARNING", **result)
         return result
     if not intraday:
         raise ValueError("No replay data")
@@ -48,6 +62,7 @@ def replay(intraday, daily, settings, mode="technical", archive=None):
     times = sorted(set().union(*(set(f.index) for f in intraday.values())))
     queued, positions, marks = {}, {}, {}
     trades, curve, funnel = [], [], Counter()
+    scan_failures, scan_examples = Counter(), {}
     cash, realized = settings.strategy_capital_usd, 0.0
     cost = (settings.slippage_bps + settings.spread_bps / 2) / 10000
     regime_cache, daily_cache = {}, {}
@@ -59,6 +74,15 @@ def replay(intraday, daily, settings, mode="technical", archive=None):
         pnl = (exit_price - pos.entry) * pos.quantity
         cash += pos.quantity * exit_price
         realized += pnl
+        emit(
+            "replay_exit",
+            symbol=symbol,
+            at_bar=when,
+            quantity=pos.quantity,
+            price=exit_price,
+            realized_pnl=pnl,
+            reason=reason,
+        )
         trades.append(
             dict(
                 symbol=symbol,
@@ -184,6 +208,9 @@ def replay(intraday, daily, settings, mode="technical", archive=None):
                 continue
             cash -= qty * price
             positions[symbol] = SimPosition(c, qty, price, when)
+            emit(
+                "replay_entry", symbol=symbol, at_bar=when, quantity=qty, price=price, setup=c.setup
+            )
             entered += 1
             funnel["entries"] += 1
             if rows[symbol].low <= c.stop:
@@ -201,6 +228,7 @@ def replay(intraday, daily, settings, mode="technical", archive=None):
                 continue
             available = now + timedelta(minutes=5, seconds=30)
             identity = identities.get(symbol, {})
+            diagnostic = {}
             candidates = scan(
                 symbol,
                 identity.get("name", symbol),
@@ -212,7 +240,15 @@ def replay(intraday, daily, settings, mode="technical", archive=None):
                 settings,
                 available,
                 identity.get("sector", "UNKNOWN"),
+                diagnostics=diagnostic,
             )
+            reason = diagnostic.get("first_failure")
+            if reason:
+                scan_failures[reason] += 1
+                if settings.debug_traces_enabled:
+                    examples = scan_examples.setdefault(reason, [])
+                    if len(examples) < 3:
+                        examples.append(safe_value(diagnostic))
             funnel["technical_candidates"] += len(candidates)
             if mode == "event":
                 candidates = [c for c in candidates if c.event_ids]
@@ -284,6 +320,7 @@ def replay(intraday, daily, settings, mode="technical", archive=None):
         by_sector=grouped("sector"),
         exits=dict(Counter(t["reason"] for t in trades)),
         funnel=dict(funnel),
+        scanner_rejection_counts=dict(scan_failures),
         spy_buy_hold_return=(
             float(benchmark.close.iloc[-1] / benchmark.open.iloc[0] - 1)
             if benchmark is not None and len(benchmark)
@@ -306,6 +343,9 @@ def replay(intraday, daily, settings, mode="technical", archive=None):
     pd.DataFrame(trades).to_csv(directory / "replay_trades.csv", index=False)
     pd.DataFrame(curve).to_csv(directory / "replay_equity_curve.csv", index=False)
     (directory / f"{mode}_summary.json").write_text(json.dumps(result, indent=2))
+    if settings.debug_traces_enabled:
+        (directory / "replay_scan_examples.json").write_text(json.dumps(scan_examples, indent=2))
+    emit("replay_completed", "INFO", strategy=mode, result=result)
     return result
 
 
@@ -319,6 +359,7 @@ def fixture_frames(path):
     )
 
 
+@traced("research.compare")
 def compare(intraday, daily, settings, archive=None):
     results = {}
     for mode in ("technical", "event", "ai"):

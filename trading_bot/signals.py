@@ -74,7 +74,7 @@ def relative_strength(daily, benchmark):
     )
 
 
-def setup_flags(frame, daily, relative, earnings_recent):
+def setup_flags(frame, daily, relative, earnings_recent, diagnostics=None):
     """Signals refer to the final completed bar; ordered retest uses earlier bars."""
     if len(frame) < 61 or len(daily) < 30:
         return {}
@@ -127,6 +127,42 @@ def setup_flags(frame, daily, relative, earnings_recent):
         and last.close > ema20.iloc[-1]
         and vol >= 1.25
     )
+    if diagnostics is not None:
+        diagnostics.update(
+            {
+                "daily_close": float(daily.close.iloc[-1]),
+                "daily_sma20": float(daily.close.tail(20).mean()),
+                "daily_uptrend": bool(uptrend),
+                "close": float(last.close),
+                "previous_close": float(previous.close),
+                "ema20_5m": float(ema20.iloc[-1]),
+                "ema50_5m": float(ema50.iloc[-1]),
+                "volume_ratio": vol,
+                "breakout_level": float(frame.high.iloc[-21:-1].max()),
+                "retest_level": float(level),
+                "gap_fraction": gap,
+                "session_bars": len(session),
+                "relative_strength_20d": relative,
+                "recent_verified_earnings": bool(earnings_recent),
+                "checks": {
+                    "breakout_price": bool(last.close > frame.high.iloc[-21:-1].max()),
+                    "breakout_volume_ge_1_25": vol >= 1.25,
+                    "ema20_above_ema50": bool(ema20.iloc[-1] > ema50.iloc[-1]),
+                    "pullback_reclaimed_ema20": bool(previous.close <= ema20.iloc[-2] < last.close),
+                    "pullback_volume_ge_0_85": vol >= 0.85,
+                    "earlier_breakout": bool(earlier_break.any()),
+                    "retest_support": bool(
+                        previous.low <= level * 1.002 and previous.close >= level * 0.995
+                    ),
+                    "retest_confirmation": bool(last.close > previous.high),
+                    "continuation_price": bool(last.close > frame.high.iloc[-4:-1].max()),
+                    "continuation_volume_ge_1_1": vol >= 1.1,
+                    "gap_ge_2pct": gap >= 0.02,
+                    "gap_opening_range_break": bool(last.close > session.high.iloc[:3].max()),
+                    "reversal_stabilized": bool(stable),
+                },
+            }
+        )
     return {
         "breakout": breakout,
         "pullback": pullback,
@@ -144,21 +180,52 @@ def setup_flags(frame, daily, relative, earnings_recent):
 
 
 def scan(
-    symbol, name, intraday, daily, benchmark, events, market_regime, settings, now, sector="UNKNOWN"
+    symbol,
+    name,
+    intraday,
+    daily,
+    benchmark,
+    events,
+    market_regime,
+    settings,
+    now,
+    sector="UNKNOWN",
+    diagnostics=None,
 ):
+    detail = diagnostics if diagnostics is not None else {}
+    detail.update(symbol=symbol, as_of=now.isoformat(), sector=sector)
+
+    def reject(reason, **metrics):
+        detail.update(outcome="rejected", first_failure=reason, **metrics)
+        return []
+
     frame = regular_completed(intraday, now)
     daily = prior_daily(daily, now)
+    detail.update(
+        intraday_bars=len(frame),
+        daily_bars=len(daily),
+        required_intraday_bars=61,
+        required_daily_bars=settings.min_daily_bars,
+    )
     if len(frame) < 61 or len(daily) < settings.min_daily_bars:
-        return []
-    if coverage(frame)["fraction"] < settings.min_intraday_coverage:
-        return []
+        return reject("insufficient_bars")
+    observed_coverage = coverage(frame)
+    detail.update(coverage=observed_coverage, required_coverage=settings.min_intraday_coverage)
+    if observed_coverage["fraction"] < settings.min_intraday_coverage:
+        return reject("insufficient_intraday_coverage")
     last_time = frame.index[-1].to_pydatetime()
     completed = last_time + timedelta(minutes=5)
+    detail.update(
+        last_bar=last_time.isoformat(),
+        last_completed=completed.isoformat(),
+        signal_age_seconds=(now - completed).total_seconds(),
+        max_signal_age_seconds=settings.signal_ttl_minutes * 60,
+    )
     if not 0 <= (now - completed).total_seconds() <= settings.signal_ttl_minutes * 60:
-        return []
+        return reject("stale_or_future_signal")
     # Gaps in the immediate confirmation sequence are not ordered confirmation.
     if any(frame.index[-6:][1:] - frame.index[-6:][:-1] != pd.Timedelta(minutes=5)):
-        return []
+        return reject("recent_bar_gaps", recent_bar_times=[t.isoformat() for t in frame.index[-6:]])
     related = list(
         {
             e.id: e
@@ -172,7 +239,9 @@ def scan(
     strength = (
         relative_strength(daily, prior_daily(benchmark, now)) if not benchmark.empty else None
     )
-    flags = setup_flags(frame, daily, strength, bool(earnings))
+    pattern_details = {} if diagnostics is not None else None
+    flags = setup_flags(frame, daily, strength, bool(earnings), pattern_details)
+    detail.update(patterns={k: bool(v) for k, v in flags.items()}, pattern_inputs=pattern_details)
     price = float(frame.close.iloc[-1])
     prior = daily.close.shift(1)
     atr = (
@@ -184,8 +253,18 @@ def scan(
         .mean()
     )
     distance = max(1.5 * float(atr), price * settings.min_stop_fraction)
+    detail.update(
+        price=price,
+        min_price=settings.min_price,
+        atr=float(atr),
+        stop_distance=distance,
+        stop_fraction=distance / price if price else None,
+        max_stop_fraction=settings.max_stop_fraction,
+    )
     if price < settings.min_price or distance / price > settings.max_stop_fraction:
-        return []
+        return reject(
+            "price_below_minimum" if price < settings.min_price else "stop_distance_exceeds_limit"
+        )
     stop, target = round(price - distance, 2), round(price + settings.reward_to_risk * distance, 2)
     volume = float(frame.volume.iloc[-1] / frame.volume.iloc[-21:-1].mean())
     entry_high = round(price * (1 + settings.no_chase_fraction), 2)
@@ -194,11 +273,20 @@ def scan(
         + 2 * settings.fee_per_share
     )
     rr = (target - entry_high - costs) / (entry_high - stop + costs)
+    detail.update(
+        stop=stop,
+        target=target,
+        entry_ceiling=entry_high,
+        modeled_round_trip_cost=costs,
+        net_reward_risk=rr,
+        min_net_reward_risk=settings.min_net_reward_risk,
+    )
     if rr < settings.min_net_reward_risk:
-        return []
+        return reject("net_reward_risk_below_minimum")
     candidates = []
     # Preserve the original two rules when applicable, including its daily filter.
     original = candidate_at(symbol, frame, daily, len(frame) - 1, limits=settings.limits())
+    detail["legacy_setup"] = original.setup if original else None
     for setup, passed in flags.items():
         if not passed or (
             setup in ("breakout", "pullback") and (not original or original.setup != setup)
@@ -232,4 +320,12 @@ def scan(
                 score=min(volume, 5) + (strength or 0) * 10 + (3 if earnings else 0),
             )
         )
+    detail.update(
+        outcome="signals" if candidates else "rejected",
+        first_failure=None
+        if candidates
+        else ("legacy_setup_filter" if any(flags.values()) else "no_matching_setup"),
+        signal_count=len(candidates),
+        setups=[c.setup for c in candidates],
+    )
     return candidates

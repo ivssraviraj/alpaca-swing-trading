@@ -7,10 +7,12 @@ from strategy import shares_for_trade
 
 from .ai import validate_approval
 from .calendar import entry_session
+from .diagnostics import emit, traced
 from .evidence import imminent_earnings
 from .models import Approval, Candidate, OrderPlan, Portfolio, Quote
 
 
+@traced("risk.plan_order")
 def plan_order(
     candidate: Candidate,
     approval: Approval,
@@ -36,6 +38,7 @@ def plan_order(
     )
 
 
+@traced("risk.size_candidate")
 def size_candidate(
     candidate: Candidate,
     quote: Quote,
@@ -47,6 +50,39 @@ def size_candidate(
     correlations=None,
 ) -> int:
     """Shared deterministic gates for execution and research. No order side effects."""
+    emit(
+        "risk_inputs",
+        symbol=candidate.symbol,
+        signal_id=candidate.signal_id,
+        as_of=now,
+        signal_at=candidate.signal_at,
+        expires_at=candidate.expires_at,
+        bid=quote.bid,
+        ask=quote.ask,
+        quote_at=quote.at,
+        quote_age_seconds=(now - quote.at).total_seconds(),
+        spread_bps=(quote.ask - quote.bid) / quote.ask * 10000 if quote.ask else None,
+        max_spread_bps=settings.max_spread_bps,
+        max_quote_age_seconds=settings.max_quote_age_seconds,
+        entry_low=candidate.entry_low,
+        entry_high=candidate.entry_high,
+        stop=candidate.stop,
+        target=candidate.target,
+        calendar_ok=calendar_ok,
+        earnings_blackout_sessions=settings.earnings_blackout_sessions,
+        portfolio_safe=portfolio.safe,
+        portfolio_reasons=portfolio.reasons,
+        exposure=portfolio.exposure,
+        stop_risk=portfolio.stop_risk,
+        equity=portfolio.equity,
+        cash=portfolio.cash,
+        positions=list(portfolio.positions),
+        pending_symbols=portfolio.pending_symbols,
+        sector=candidate.sector,
+        sector_counts=portfolio.sector_counts,
+        correlations=correlations,
+        kill_switch=settings.kill_switch,
+    )
     if settings.kill_switch:
         raise ValueError("Kill switch blocks new entries")
     if not portfolio.safe:
@@ -115,4 +151,14 @@ def size_candidate(
     qty = min(qty, int(settings.max_order_notional // price))
     if qty <= 0:
         raise ValueError("Portfolio, cash or risk limit exceeded")
+    emit(
+        "risk_passed",
+        "INFO",
+        symbol=candidate.symbol,
+        quantity=qty,
+        notional=qty * price,
+        modeled_risk_per_share=price - candidate.stop + costs,
+        risk_fraction=settings.risk_per_trade,
+        regime_multiplier=candidate.regime.size_multiplier,
+    )
     return qty

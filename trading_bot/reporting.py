@@ -6,6 +6,7 @@ from collections import Counter
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
+from .diagnostics import emit, error_details, traced
 from .providers import BoundedSession
 
 SHEET_TITLE = "Alpaca Paper Fills"
@@ -33,13 +34,16 @@ class Reporter:
             settings.request_timeout_seconds, settings.request_interval_seconds
         )
 
+    @traced("reporting.notify")
     def notify(self, kind, message, key):
         if kind not in {"fill", "weekly", "safety"}:
             return False
         if self.store.get("notified:" + key):
+            emit("notification_deduplicated", kind=kind, event_key=key)
             return True
         url = self.cfg.alert_webhook_url.get_secret_value()
         if not url:
+            emit("notification_skipped", kind=kind, reason="destination_not_configured")
             return False
         if not url.startswith("https://"):
             raise ValueError("Notification webhook requires HTTPS")
@@ -48,11 +52,13 @@ class Reporter:
             response = self.http.post(url, json={field: message[:1900]})
             response.raise_for_status()
             self.store.put("notified:" + key, True)
+            emit("notification_sent", "INFO", kind=kind, event_key=key)
             return True
         except Exception as exc:
-            self.store.audit("notification_failure", {"kind": kind, "error": type(exc).__name__})
+            self.store.audit("notification_failure", {"kind": kind, **error_details(exc)})
             return False
 
+    @traced("reporting.fills")
     def fills(self):
         for event in self.store.events("fill"):
             f = event["payload"]
@@ -69,8 +75,10 @@ class Reporter:
             )
             self.notify("fill", message, event["id"])
 
+    @traced("reporting.sheet")
     def sheet(self, book=None):
         if not self.cfg.sheets_enabled:
+            emit("sheets_skipped", reason="disabled")
             return "DISABLED"
         try:
             import gspread
@@ -125,9 +133,10 @@ class Reporter:
             self.store.audit("sheets_sync", {"rows": len(rows), "status": "SUCCESS"})
             return "SUCCESS"
         except Exception as exc:
-            self.store.audit("sheets_failure", {"error": type(exc).__name__})
+            self.store.audit("sheets_failure", error_details(exc))
             return "FAILED"
 
+    @traced("reporting.weekly")
     def weekly(self, now):
         all_events = self.store.events()
         recent = [e for e in all_events if e["at"] >= (now - timedelta(days=7)).isoformat()]

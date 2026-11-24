@@ -17,6 +17,55 @@
 7. Complete the external acceptance scenarios in TEST_REPORT.md. This delivery
    does not authorize automatic paper execution or claim those scenarios passed.
 
+## Debugging a workflow run
+
+Detailed diagnostics are on by default: `LOG_LEVEL=DEBUG` and
+`DEBUG_TRACES_ENABLED=true`. GitHub Actions exposes both as repository/environment
+variables. The engine writes structured JSON to stderr and `reports/runtime.jsonl`;
+stdout remains the final command result. Each invocation has a UUID `run_id`, mode,
+GitHub run/attempt and commit SHA when available. Stage boundaries include duration;
+failures include type, HTTP status when available, and source file/line/function,
+without exception locals or raw provider messages.
+
+Open the Actions run's **Summary** first. The scan funnel, first rejection counts,
+setup pass counts, candidate rejection stages and recent warnings appear there.
+Download the audit artifact for the details:
+
+| File | What it explains |
+|---|---|
+| `runtime.jsonl` | Configuration without credentials; lock/cache decisions; provider requests, retries and latency; evidence, AI budget/decisions, risk inputs, broker operations, recovery, replay and reporting |
+| `scan_summary.json` | Counts for the latest completed scan, including AI review attempts and risk approvals |
+| `scan_diagnostics.json` | Initial scan of every universe symbol: coverage, bar freshness, indicator values, setup checks, stop distance, costs/reward-risk and first rejection |
+| `audit.jsonl` | Cumulative durable business audit; debug traces include run IDs and initial/before-AI/after-AI scan phases |
+| `universe.json` | Selected symbols, ranking inputs and sector labels, including on cache hits |
+| `replay_scan_examples.json` | Up to three bar-level examples per scanner rejection reason; aggregate counts are in each replay strategy's summary |
+| `run_summary.md` | Local copy of the GitHub summary |
+
+First-failure counts are mutually exclusive. Setup checks are separate and can
+overlap: a symbol can fail a stop-distance limit **and** have no matching pattern.
+Pattern checks are unavailable when history/coverage/freshness fails first. A pattern
+pass is not a trade approval; legacy checks, evidence, AI and risk gates still apply.
+AI review attempts include disabled/failed/cached reviews, not just billed API calls.
+Use run IDs when comparing artifacts; local reports may contain files from older runs.
+
+Missing sector classifications produce an explicit warning. `UNKNOWN` remains one
+shared concentration bucket. Supply a verified symbol-to-sector JSON file through
+`SECTOR_MAP_PATH` (for example `{"AAPL": "Information Technology"}`); a runner must
+have that file checked out or provisioned. Updating the mapping invalidates the
+same-day universe cache. This change does not invent classifications or bypass limits.
+
+To reduce verbosity later, use `LOG_LEVEL=INFO` and
+`DEBUG_TRACES_ENABLED=false`. This disables detailed runtime events and new durable
+debug traces/per-symbol artifacts while keeping business audits and scan summaries.
+Keep at least INFO for complete GitHub lifecycle summaries. Existing logs are not
+deleted. Durable debug rows accumulate, so account for them in retention planning;
+do not remove fills, intents or recovery checkpoints to reduce log volume.
+
+Runtime diagnostics redact configured secrets, sensitive fields, URL paths/queries,
+and database connection strings. Raw HTTP headers/bodies and SQL parameters are not
+logged. Business evidence remains in the audit/archive for reproducibility; those
+artifacts still contain account/trade information and should remain private.
+
 ## Entry freeze and exit management
 
 `KILL_SWITCH=true` blocks new entries. Keep `paper-execute`, paper credentials and

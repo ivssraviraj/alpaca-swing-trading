@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import json
+from collections import Counter
 from datetime import datetime, timedelta, timezone
 
 import pandas as pd
 
 from .ai import validate_approval
 from .calendar import entry_session, held_sessions
+from .diagnostics import emit, error_details, run_id, traced
 from .evidence import news_events
 from .models import fingerprint
 from .observation import capture_markouts, pending_rejections
@@ -44,9 +47,20 @@ class Pipeline:
         self.universe, self.evidence, self.ai, self.reporter = universe, evidence, ai, reporter
         self.clock = clock or (lambda: datetime.now(timezone.utc))
 
+    @traced("pipeline.run")
     def run(self, mode):
         self.store.require_lock()
         now = self.clock()
+        self.store.trace(
+            "pipeline_started",
+            {
+                "mode": mode,
+                "ai_enabled": self.cfg.ai_enabled,
+                "paper_orders_enabled": self.cfg.paper_orders_enabled,
+                "feed": self.cfg.data_feed,
+            },
+            now,
+        )
         # Every mode reconciles first; execution mode also maintains exits, even
         # if AI/news/data subsequently fail or KILL_SWITCH blocks entries.
         try:
@@ -79,6 +93,18 @@ class Pipeline:
             return {"status": "ENTRY_FREEZE", "scanned": 0}
         universe = self.universe.build(now)
         symbols = [r["symbol"] for r in universe]
+        unknown = [r["symbol"] for r in universe if r.get("sector", "UNKNOWN") == "UNKNOWN"]
+        if unknown:
+            self.store.audit(
+                "sector_mapping_warning",
+                {
+                    "unknown_count": len(unknown),
+                    "symbols": unknown,
+                    "reason": "Unclassified symbols share the UNKNOWN concentration bucket",
+                    "sector_map_configured": bool(self.cfg.sector_map_path),
+                },
+                now,
+            )
         all_symbols = sorted(
             set(symbols + ["SPY", "QQQ", "IWM"] + list(SECTOR_ETFS) + list(portfolio.positions))
         )
@@ -89,13 +115,13 @@ class Pipeline:
             events, calendar_ok = self.evidence.calendar(now)
         except Exception as exc:
             events, calendar_ok = [], False
-            self.store.audit("event_failure", {"error": type(exc).__name__}, now)
+            self.store.audit("event_failure", error_details(exc), now)
         try:
             macro_events, macro_ok = self.evidence.macro(now)
             events.extend(macro_events)
         except Exception as exc:
             macro_ok = False
-            self.store.audit("macro_failure", {"error": type(exc).__name__}, now)
+            self.store.audit("macro_failure", error_details(exc), now)
         discovery = sorted(
             {
                 e.symbol
@@ -108,7 +134,7 @@ class Pipeline:
                 events.extend(news_events(self.evidence.news(symbol, now)))
             except Exception as exc:
                 self.store.audit(
-                    "event_evidence_missing", {"symbol": symbol, "error": type(exc).__name__}, now
+                    "event_evidence_missing", {"symbol": symbol, **error_details(exc)}, now
                 )
         self.store.audit(
             "earnings_funnel",
@@ -127,10 +153,22 @@ class Pipeline:
             if not portfolio.safe:
                 return {"status": "ENTRY_FREEZE", "scanned": 0, "reasons": portfolio.reasons}
         candidates, scanned = [], 0
+        diagnostics, failures, pattern_counts = [], Counter(), Counter()
         identities = {r["symbol"]: r for r in universe}
         for row in universe:
             symbol = row["symbol"]
             if symbol not in intraday or symbol not in daily:
+                detail = {
+                    "symbol": symbol,
+                    "phase": "initial",
+                    "outcome": "rejected",
+                    "first_failure": "missing_market_data",
+                    "daily_available": symbol in daily,
+                    "intraday_available": symbol in intraday,
+                }
+                diagnostics.append(detail)
+                failures["missing_market_data"] += 1
+                self.store.trace("scan_diagnostic", detail, now)
                 continue
             scanned += 1
             scan_time = now
@@ -140,6 +178,7 @@ class Pipeline:
                 )
                 if now - last_completed > timedelta(minutes=self.cfg.signal_ttl_minutes):
                     scan_time = last_completed
+            detail = {"phase": "initial"}
             found = scan(
                 symbol,
                 row["name"],
@@ -151,7 +190,13 @@ class Pipeline:
                 self.cfg,
                 scan_time,
                 row["sector"],
+                diagnostics=detail,
             )
+            diagnostics.append(detail)
+            self.store.trace("scan_diagnostic", detail, now)
+            if detail.get("first_failure"):
+                failures[detail["first_failure"]] += 1
+            pattern_counts.update({k: int(v) for k, v in detail.get("patterns", {}).items()})
             for c in found:
                 self.store.audit("signal", c.model_dump(mode="json"), now)
             candidates.extend(found)
@@ -174,14 +219,37 @@ class Pipeline:
             if len(shortlist) == self.cfg.shortlist_size:
                 break
         submitted, conditional_count = 0, 0
+        candidate_failures, ai_reviews, risk_approved = Counter(), 0, 0
+        self.store.trace(
+            "shortlist_selected",
+            {
+                "candidate_count": len(candidates),
+                "distinct_candidate_symbols": len({c.symbol for c in candidates}),
+                "limit": self.cfg.shortlist_size,
+                "selected": [
+                    {
+                        "symbol": c.symbol,
+                        "setup": c.setup,
+                        "score": c.score,
+                        "expires_at": c.expires_at.isoformat(),
+                    }
+                    for c in shortlist
+                ],
+            },
+            now,
+        )
         for c in shortlist:
+            stage = "signal_freshness"
             try:
                 now = self.clock()
                 if now >= c.expires_at:
                     raise ValueError("Historical observation only; technical signal expired")
+                stage = "news_enrichment"
                 news = self.evidence.news(c.symbol, now)
                 enriched = list({e.id: e for e in events + news_events(news)}.values())
                 row = identities[c.symbol]
+                stage = "technical_recheck_before_ai"
+                detail = {"phase": "before_ai"}
                 choices = scan(
                     c.symbol,
                     c.company,
@@ -193,18 +261,25 @@ class Pipeline:
                     self.cfg,
                     now,
                     row["sector"],
+                    diagnostics=detail,
                 )
+                self.store.trace("scan_diagnostic", detail, now)
                 if not choices:
                     raise ValueError("Signal no longer valid before AI")
                 c = max(choices, key=lambda x: (x.score, x.setup.startswith("post_earnings")))
+                stage = "ai_review"
+                ai_reviews += 1
                 approval = self.ai.evaluate(c, news, enriched, now)
                 now = self.clock()
                 # Retrieve again after AI latency: new news invalidates cached approval.
+                stage = "approval_and_news_revalidation"
                 latest_news = self.evidence.news(c.symbol, now)
                 validate_approval(approval, c, latest_news, now, self.cfg, events=enriched)
+                stage = "technical_recheck_after_ai"
                 refreshed = self.data.intraday([c.symbol], now)
                 if c.symbol not in refreshed:
                     raise ValueError("Missing final technical data")
+                detail = {"phase": "after_ai"}
                 final = scan(
                     c.symbol,
                     c.company,
@@ -216,11 +291,14 @@ class Pipeline:
                     self.cfg,
                     now,
                     row["sector"],
+                    diagnostics=detail,
                 )
+                self.store.trace("scan_diagnostic", detail, now)
                 if not any(
                     fingerprint(x.model_dump(mode="json")) == approval.candidate_hash for x in final
                 ):
                     raise ValueError("Signal changed after approval")
+                stage = "risk_and_quote_validation"
                 portfolio = self.broker.reconcile(now)
                 corr = correlations(c.symbol, daily, portfolio.positions)
                 plan = plan_order(
@@ -240,7 +318,9 @@ class Pipeline:
                     {"signal_id": c.signal_id, "quantity": plan.quantity, "mode": mode},
                     now,
                 )
+                risk_approved += 1
                 if mode == "paper-execute" and submitted < self.cfg.max_entries_per_scan:
+                    stage = "paper_execution"
                     result = self.broker.execute(
                         c,
                         approval,
@@ -257,14 +337,27 @@ class Pipeline:
                     self.store.audit(
                         "conditional_setup", {"signal_id": c.signal_id, "mode": mode}, now
                     )
+                else:
+                    self.store.trace(
+                        "candidate_capacity_reached",
+                        {
+                            "symbol": c.symbol,
+                            "mode": mode,
+                            "entry_limit": self.cfg.max_entries_per_scan,
+                        },
+                        now,
+                    )
             except Exception as exc:
+                candidate_failures[stage] += 1
                 self.store.audit(
                     "candidate_rejected",
                     {
                         "symbol": c.symbol,
                         "signal_id": c.signal_id,
                         "candidate": c.model_dump(mode="json"),
-                        "reason": str(exc) if isinstance(exc, ValueError) else type(exc).__name__,
+                        "stage": stage,
+                        "reason": error_details(exc).get("reason", type(exc).__name__),
+                        **error_details(exc),
                     },
                     self.clock(),
                 )
@@ -272,6 +365,7 @@ class Pipeline:
         self.reporter.fills()
         self.reporter.sheet()
         summary = {
+            "run_id": run_id(),
             "status": mode,
             "universe_requested": self.cfg.universe_size,
             "universe_selected": len(symbols),
@@ -280,8 +374,39 @@ class Pipeline:
             "shortlisted": len(shortlist),
             "submitted": submitted,
             "conditional_setups": conditional_count,
+            "ai_review_attempts": ai_reviews,
+            "risk_approved": risk_approved,
+            "candidate_rejection_counts": dict(candidate_failures),
             "feed": self.cfg.data_feed,
             "event_calendar": calendar_ok,
+            "rejection_counts": dict(failures),
+            "setup_pass_counts": dict(pattern_counts),
+            "pattern_evaluated": sum("patterns" in d for d in diagnostics),
+            "pattern_matched_symbols": sum(
+                any(d.get("patterns", {}).values()) for d in diagnostics
+            ),
+            "unknown_sectors": len(unknown),
         }
+        self.cfg.reports_dir.mkdir(parents=True, exist_ok=True)
+        (self.cfg.reports_dir / "scan_summary.json").write_text(json.dumps(summary, indent=2))
+        if self.cfg.debug_traces_enabled:
+            (self.cfg.reports_dir / "scan_diagnostics.json").write_text(
+                json.dumps(
+                    {
+                        "run_id": run_id(),
+                        "as_of": now.isoformat(),
+                        "summary": summary,
+                        "symbols": diagnostics,
+                    },
+                    indent=2,
+                )
+            )
+        if not candidates:
+            emit(
+                "no_signals",
+                "INFO",
+                explanation="First-failure counts are mutually exclusive; pattern outcomes are separate and may overlap risk failures",
+                **summary,
+            )
         self.store.audit("scan", summary, self.clock())
         return summary
