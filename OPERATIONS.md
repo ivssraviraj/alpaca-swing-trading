@@ -66,6 +66,38 @@ and database connection strings. Raw HTTP headers/bodies and SQL parameters are 
 logged. Business evidence remains in the audit/archive for reproducibility; those
 artifacts still contain account/trade information and should remain private.
 
+## Testing GitHub scheduler delivery
+
+`Scheduler Heartbeat` runs at UTC minutes `01,16,31,46` every hour, including
+weekends and exchange holidays. It also runs immediately when its own workflow
+file is pushed to `main`, and supports manual dispatch. No initial manual run is
+required to activate a schedule on the default branch.
+
+The probe uses only Python's standard library and read-only GitHub Actions metadata.
+It has no checkout, package installation, paper environment, trading credentials,
+broker calls or shared trading concurrency group. Its two-minute timeout bounds
+each invocation. It is an independent diagnostic of the same GitHub scheduler,
+not a replacement scheduler or a fix for delayed cron events.
+
+Inspect the run summary for event type, run ID, commit, UTC/New York timestamps,
+and creation-to-job-start latency. A successful `push` or `workflow_dispatch` run
+does not prove that cron works: filter Actions runs by `event=schedule`. Compare
+the expected quarter-hour slots with actual run creation and job-start timestamps.
+The probe cannot observe a missing invocation from inside that missing run, and
+the API does not identify the original nominal firing time of a delayed event.
+
+List recent automatic deliveries:
+
+```bash
+gh run list --repo ivssraviraj/alpaca-swing-trading \
+  --workflow scheduler-heartbeat.yml --event schedule --limit 30 \
+  --json databaseId,createdAt,status,conclusion,url
+```
+
+Disable only `scheduler-heartbeat.yml` when the experiment is finished. While
+enabled it requests 96 short runs/day (2,880 in a 30-day month). The existing
+Swing Engine schedule and execution settings are unchanged.
+
 ## Entry freeze and exit management
 
 `KILL_SWITCH=true` blocks new entries. Keep `paper-execute`, paper credentials and
