@@ -9,6 +9,7 @@ scheduled = set()
 probes = {
     "scheduler-heartbeat.yml": "1,16,31,46 * * * *",
     "scheduler-offset-probe.yml": "7,22,37,52 * * * *",
+    "scheduler-minimal-probe.yml": "2/5 * * * *",
 }
 for path in files:
     workflow = yaml.load(path.read_text(), Loader=yaml.BaseLoader)
@@ -23,16 +24,18 @@ for path in files:
                 "branches": ["main"],
                 "paths": [str(path)],
             }
-            assert workflow["permissions"] == {"contents": "read", "actions": "read"}
+            minimal = path.name == "scheduler-minimal-probe.yml"
+            assert workflow["permissions"] == (
+                {"contents": "read"} if minimal else {"contents": "read", "actions": "read"}
+            )
             assert "concurrency" not in workflow and "env" not in workflow
             assert set(workflow["jobs"]) == {"heartbeat"}
             job = workflow["jobs"]["heartbeat"]
             assert "environment" not in job and "env" not in job
             assert job["timeout-minutes"] == "2"
             assert all("uses" not in step for step in job["steps"])
-            assert all(
-                step.get("env", {}) == {"GH_TOKEN": "${{ github.token }}"} for step in job["steps"]
-            )
+            expected_env = {} if minimal else {"GH_TOKEN": "${{ github.token }}"}
+            assert all(step.get("env", {}) == expected_env for step in job["steps"])
             assert not any(
                 forbidden in path.read_text()
                 for forbidden in ("secrets.", "trading_bot", "engine.py", "pip install")

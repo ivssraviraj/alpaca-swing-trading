@@ -73,6 +73,18 @@ weekends and exchange holidays. It also runs immediately when its own workflow
 file is pushed to `main`, and supports manual dispatch. No initial manual run is
 required to activate a schedule on the default branch.
 
+`Scheduler Offset Probe` is a second dummy workflow at UTC minutes `07,22,37,52`,
+also all day including weekends. It has the same isolation and timestamp receipt
+as the first probe. This compares a fresh schedule away from the hour boundary
+with the original schedule. Neither probe invokes the engine. Cloudflare setup was
+deferred on 2026-11-28 at the user's request; native scheduling remains authoritative.
+
+`Scheduler Minimal Probe` is a temporary five-minute test at minutes `02,07,12,...,57`.
+It only prints the event, run ID, revision and clock time. It makes no API calls,
+uses no tokens or secrets and has no checkout, environment or concurrency setting.
+Use the API auditor to retrieve its creation/job timestamps. Disable this higher
+frequency probe after the bounded diagnostic session.
+
 The probe uses only Python's standard library and read-only GitHub Actions metadata.
 It has no checkout, package installation, paper environment, trading credentials,
 broker calls or shared trading concurrency group. Its two-minute timeout bounds
@@ -94,9 +106,40 @@ gh run list --repo ivssraviraj/alpaca-swing-trading \
   --json databaseId,createdAt,status,conclusion,url
 ```
 
-Disable only `scheduler-heartbeat.yml` when the experiment is finished. While
-enabled it requests 96 short runs/day (2,880 in a 30-day month). The existing
-Swing Engine schedule and execution settings are unchanged.
+Each probe requests 96 short runs/day (2,880 in a 30-day month). Together they request
+192/day. The temporary five-minute probe adds 288/day while enabled. Disable the
+diagnostic workflows when the experiment is finished; do not
+disable `swing-scan.yml` as part of probe cleanup. These diagnostic changes do not
+change the Swing Engine's schedule or execution settings.
+
+Generate a read-only, bounded API audit using the repository's Python environment:
+
+```bash
+python scripts/audit_schedule.py \
+  --since 2026-11-22T00:00:00-05:00 --include-engine-logs \
+  --output output/scheduling/native-audit.json
+```
+
+The JSON separates expected market-session slots, actual creations, job starts,
+manual runs, and parsed final engine results. Times include New York and UTC.
+It applies the NYSE calendar, including early closes and DST, to the engine slots.
+Expected schedules come from the recorded current `main` revision: split audit
+windows if historical cron definitions or enabled state changed. A run created inside a slot's
+15-minute window is only a **creation-window observation**. GitHub does not expose
+the original nominal firing timestamp, so do not relabel it as proven on-time
+delivery or assign off-hours runs to specific missing slots.
+
+The 2026-11-28 audit found all 92 regular-session creation windows empty for
+November 23–27 (26 + 26 + 26 + 0 + 14). Eight scheduled engine records existed,
+all outside regular sessions; jobs started 3–4 seconds after creation. Four ended
+at `ENTRY_FREEZE`; four completed `observe` scans with zero submissions. A separate
+manual dry run on November 25 waited 178 seconds before its job started. That
+manual queue delay does not explain absent scheduled run records.
+
+On November 28, the original dummy was disabled and re-enabled at 14:56:26 and
+14:56:32 EST respectively, with API states verified. The offset dummy was deployed
+at 14:50 EST. Treat these as recovery experiments, not a proven scheduler repair.
+Do not implement catch-up trades for old slots based on a delayed cron delivery.
 
 ## Entry freeze and exit management
 

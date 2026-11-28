@@ -1,0 +1,36 @@
+name: Scheduler Minimal Probe
+run-name: Scheduler minimal probe · ${{ github.event_name }} · ${{ github.run_number }}
+on:
+  schedule:
+    # Temporary five-minute diagnostic, offset from the full hour. UTC, all days.
+    - cron: '2/5 * * * *'
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/scheduler-minimal-probe.yml
+permissions:
+  contents: read
+jobs:
+  heartbeat:
+    name: Scheduler minimal probe
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Print event receipt only
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          from datetime import datetime, timezone
+          from zoneinfo import ZoneInfo
+
+          now = datetime.now(timezone.utc)
+          print(json.dumps({
+              "event": os.environ["GITHUB_EVENT_NAME"],
+              "run_id": os.environ["GITHUB_RUN_ID"],
+              "revision": os.environ["GITHUB_SHA"],
+              "observed_at_utc": now.isoformat(),
+              "observed_at_new_york": now.astimezone(ZoneInfo("America/New_York")).isoformat(),
+          }))
+          PY
