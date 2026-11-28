@@ -11,12 +11,20 @@ at 2026-11-27 22:51:19 EST. As of 23:06 EST there was still no `schedule` run re
 including for the 23:01 slot. This does not identify GitHub's internal failure cause
 or prove the event can never arrive later.
 
+Follow-up at 2026-11-28 12:47 EST found two automatic heartbeat runs:
+[46106820337](https://github.com/ivssraviraj/alpaca-swing-trading/actions/runs/46106820337)
+created Friday 23:17:10 EST, and
+[46149683504](https://github.com/ivssraviraj/alpaca-swing-trading/actions/runs/46149683504)
+created Saturday 08:27:12 EST. The 9-hour-10-minute creation gap is incompatible
+with reliable 15-minute delivery. Their original intended slots are not exposed,
+and the first occurring after the manual run does not establish causation.
+
 ## Why this option
 
 | Option | What it addresses | Limitation |
 |---|---|---|
 | Correct native cron | Wrong hours / timezone | Existing UTC envelope already covers both DST states; no missing-hour defect established |
-| Second GitHub workflow | Isolates engine, permissions, concurrency and environment | Shares GitHub's scheduled-event service; our independent heartbeat has no automatic run record yet |
+| Second GitHub workflow | Isolates engine, permissions, concurrency and environment | Shares GitHub's scheduled-event service; our independent heartbeat also has a nine-hour gap |
 | External clock + dispatch | Removes dependence on GitHub's scheduled-event delivery | Still depends on GitHub API/runners; requires account, narrow credential, monitoring |
 
 Recommend the external clock after the non-trading verification below. There is no
