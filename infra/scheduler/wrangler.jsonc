@@ -1,0 +1,18 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "alpaca-swing-clock",
+  "main": "worker.mjs",
+  "compatibility_date": "2026-11-27",
+  "workers_dev": true,
+  "triggers": { "crons": ["* * * * *"] },
+  "vars": {
+    "ENABLED": "false",
+    "TARGET": "probe",
+    "ACTIVE_FROM": "SET_TO_A_FUTURE_UTC_TIME_BEFORE_ENABLING"
+  },
+  "d1_databases": [{
+    "binding": "DB",
+    "database_name": "alpaca-swing-clock",
+    "database_id": "REPLACE_WITH_FREE_D1_DATABASE_ID"
+  }]
+}

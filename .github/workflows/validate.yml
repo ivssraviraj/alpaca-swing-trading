@@ -22,6 +22,11 @@ jobs:
       - run: python -m pytest --cov=trading_bot --cov-report=term-missing
       - run: python -m trading_bot replay --fixture tests/fixtures/market.json --archive tests/fixtures/events.json
       - run: python scripts/check_workflows.py
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Check external scheduler admission and calendar
+        run: node --test infra/scheduler/worker.test.mjs
       - name: Summarize fixture replay
         if: always()
         run: python scripts/write_run_summary.py

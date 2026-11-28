@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import subprocess
 import sys
 import time
@@ -63,6 +64,13 @@ def _main(argv=None):
         cfg = Settings()
         configure(cfg, args.mode)
         configured = True
+        from .scheduling import claim_slot, finish_slot, publish_receipt, scheduled_request
+
+        slot, schedule_skip = scheduled_request(args.mode, os.environ, datetime.now(timezone.utc))
+        if schedule_skip:
+            emit("scheduled_run_skipped", "INFO", reason=schedule_skip)
+            print(json.dumps({"status": schedule_skip, "scanned": 0}))
+            return 0
         if args.mode == "validate-config":
             print(
                 json.dumps(
@@ -118,6 +126,15 @@ def _main(argv=None):
         )
         try:
             with store.writer():
+                receipt = None
+                if slot:
+                    receipt = claim_slot(
+                        store, slot, datetime.now(timezone.utc), durable_required=cfg.github_actions
+                    )
+                    if receipt is None:
+                        print(json.dumps({"status": "DUPLICATE_SLOT", "scanned": 0}))
+                        return 0
+                    publish_receipt(receipt, cfg.reports_dir, os.environ)
                 store.trace(
                     "workflow_started",
                     {
@@ -190,7 +207,16 @@ def _main(argv=None):
                     AIService(cfg, store),
                     reporter,
                 )
+                if slot and datetime.now(timezone.utc) >= slot.deadline:
+                    result = {"status": "STALE_SLOT", "scanned": 0}
+                    receipt = finish_slot(store, receipt, result, datetime.now(timezone.utc))
+                    publish_receipt(receipt, cfg.reports_dir, os.environ)
+                    print(json.dumps(result))
+                    return 0
                 result = pipeline.run(args.mode)
+                if receipt:
+                    receipt = finish_slot(store, receipt, result, datetime.now(timezone.utc))
+                    publish_receipt(receipt, cfg.reports_dir, os.environ)
                 print(json.dumps(result, default=str))
         finally:
             try:

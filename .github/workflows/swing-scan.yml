@@ -1,4 +1,5 @@
 name: Alpaca Swing Engine
+run-name: Swing · ${{ inputs.scheduled_for || github.event_name }} · ${{ inputs.mode || 'scheduled' }}
 on:
   workflow_dispatch:
     inputs:
@@ -11,6 +12,10 @@ on:
         description: Calendar days for replay
         type: string
         default: '100'
+      scheduled_for:
+        description: External scheduler's original slot timestamp (ISO 8601 with timezone)
+        type: string
+        default: ''
   schedule:
     - cron: '3,18,33,48 13-22 * * 1-5'
     - cron: '17 14 * * 6'
@@ -56,6 +61,11 @@ jobs:
       GOOGLE_SHEET_ID: ${{ vars.GOOGLE_SHEET_ID || '' }}
       ALERT_WEBHOOK_KIND: ${{ vars.ALERT_WEBHOOK_KIND || 'discord' }}
       REPLAY_DAYS: ${{ inputs.replay_days || '100' }}
+      SCHEDULED_FOR: ${{ inputs.scheduled_for || '' }}
+      SCHEDULER_AUTHORITY: ${{ vars.SCHEDULER_AUTHORITY || 'native' }}
+      EXTERNAL_SCHEDULER_MODE: ${{ vars.EXTERNAL_SCHEDULER_MODE || 'observe' }}
+      SCHEDULER_RECEIPT_URL: ${{ vars.SCHEDULER_RECEIPT_URL || '' }}
+      SCHEDULER_RECEIPT_TOKEN: ${{ secrets.SCHEDULER_RECEIPT_TOKEN }}
       MODE: ${{ github.event_name == 'workflow_dispatch' && inputs.mode || (github.event.schedule == '17 14 * * 6' && 'weekly-report' || (vars.PAPER_ORDERS_ENABLED == 'true' && 'paper-execute' || 'observe')) }}
     steps:
       - uses: actions/checkout@v4

@@ -153,6 +153,11 @@ as FAILED, never successful persistence. The actual sheet was not accessed in th
 
 ## Operational limitations requiring validation
 
+The optional [external scheduler setup](infra/scheduler/README.md) is disabled by
+default. It dispatches a secret-free probe or explicit `observe` slots. Activating
+external authority requires durable slot claims and suppresses native scheduled
+scans; the existing concurrency lock alone does not deduplicate sequential runs.
+
 GitHub cron can delay, drop or terminate runs. Broker GTC exits work independently,
 but a partially filled bracket can leave a protection gap until recovery. A crash
 between submitting an entry and requesting cancellation can leave an entry working;
