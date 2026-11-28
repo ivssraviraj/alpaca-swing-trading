@@ -134,7 +134,10 @@ def audit_workflow(repository, filename, revision, start, end, bounds, include_l
     begin = max(start, instant(metadata["created_at"]))
     engine = filename == "swing-scan.yml"
     expected = expected_minutes(
-        definition["on"].get("schedule", []), begin, end, bounds if engine else None
+        definition["on"].get("schedule", []),
+        begin,
+        end + timedelta(minutes=15),
+        bounds if engine else None,
     )
     runs = []
     page = 1
@@ -179,8 +182,12 @@ def audit_workflow(repository, filename, revision, start, end, bounds, include_l
             item["engine_outcome"] = engine_outcome(repository, run)
         actual.append(item)
     slots = []
-    for due in expected:
+    for index, due in enumerate(expected):
+        if due > end:
+            break
         close = due + timedelta(minutes=15)
+        if index + 1 < len(expected):
+            close = min(close, expected[index + 1])
         if engine:
             close = min(close, bounds[due.astimezone(NY).date().isoformat()][1])
         ids = [
@@ -236,6 +243,7 @@ def main():
         "interpretation": (
             "Expected slots use the current main revision, starting no earlier than workflow creation. "
             "Historical cron changes require separate windows. Creation buckets are observations, "
+            "ending at the next slot or after 15 minutes, whichever comes first, "
             "not proof of nominal trigger identity: GitHub does not expose that timestamp here. "
             "An empty bucket does not establish the internal reason. Job delay is measured only "
             "after run creation; rerun attempts retain the original run creation time."

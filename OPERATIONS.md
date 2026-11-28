@@ -125,7 +125,8 @@ manual runs, and parsed final engine results. Times include New York and UTC.
 It applies the NYSE calendar, including early closes and DST, to the engine slots.
 Expected schedules come from the recorded current `main` revision: split audit
 windows if historical cron definitions or enabled state changed. A run created inside a slot's
-15-minute window is only a **creation-window observation**. GitHub does not expose
+window (until the next slot or at most 15 minutes) is only a **creation-window
+observation**. GitHub does not expose
 the original nominal firing timestamp, so do not relabel it as proven on-time
 delivery or assign off-hours runs to specific missing slots.
 
@@ -196,10 +197,11 @@ as FAILED, never successful persistence. The actual sheet was not accessed in th
 
 ## Operational limitations requiring validation
 
-The optional [external scheduler setup](infra/scheduler/README.md) is disabled by
-default. It dispatches a secret-free probe or explicit `observe` slots. Activating
-external authority requires durable slot claims and suppresses native scheduled
-scans; the existing concurrency lock alone does not deduplicate sequential runs.
+Native GitHub scheduling is the selected setup. No external clock is configured.
+The existing concurrency lock prevents overlapping execution but does not prevent
+sequential duplicate native invocations. The optional explicit-slot admission code
+only applies when `SCHEDULER_AUTHORITY=external`; it is inactive in the native setup.
+Do not claim native per-slot deduplication has been established by these diagnostics.
 
 GitHub cron can delay, drop or terminate runs. Broker GTC exits work independently,
 but a partially filled bracket can leave a protection gap until recovery. A crash
