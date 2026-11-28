@@ -1,5 +1,9 @@
 # Independent clock: prepared, not activated
 
+**Deferred on 2026-11-28:** the user chose to diagnose and use native GitHub
+scheduling without Cloudflare. No Cloudflare account, deployment, secrets or
+external authority were activated. The following is an inactive design reference.
+
 GitHub Actions does **not** need a first manual run to enable cron. `workflow_dispatch`
 starts one run. Cloudflare is optional: this design replaces the source of timed
 triggers while the existing GitHub workflow remains the executor. It cannot remove

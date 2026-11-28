@@ -6,18 +6,22 @@ import yaml
 
 files = list(Path(".github/workflows").glob("*.yml"))
 scheduled = set()
+probes = {
+    "scheduler-heartbeat.yml": "1,16,31,46 * * * *",
+    "scheduler-offset-probe.yml": "7,22,37,52 * * * *",
+}
 for path in files:
     workflow = yaml.load(path.read_text(), Loader=yaml.BaseLoader)
     triggers = workflow["on"]
     assert workflow.get("permissions", {}).get("contents") == "read", path
     if "schedule" in triggers:
         scheduled.add(path.name)
-        if path.name == "scheduler-heartbeat.yml":
-            assert triggers["schedule"] == [{"cron": "1,16,31,46 * * * *"}]
+        if path.name in probes:
+            assert triggers["schedule"] == [{"cron": probes[path.name]}]
             assert set(triggers) == {"schedule", "workflow_dispatch", "push"}
             assert triggers["push"] == {
                 "branches": ["main"],
-                "paths": [".github/workflows/scheduler-heartbeat.yml"],
+                "paths": [str(path)],
             }
             assert workflow["permissions"] == {"contents": "read", "actions": "read"}
             assert "concurrency" not in workflow and "env" not in workflow
@@ -43,8 +47,8 @@ for path in files:
         for job in workflow["jobs"].values()
         for step in job["steps"]
     )
-assert scheduled == {"swing-scan.yml", "scheduler-heartbeat.yml"}, scheduled
+assert scheduled == {"swing-scan.yml", *probes}, scheduled
 print(
-    f"PASS: {len(files)} workflow YAML files; one scheduled executor plus read-only heartbeat; "
+    f"PASS: {len(files)} workflow YAML files; one scheduled executor plus {len(probes)} read-only probes; "
     "no order mode on push"
 )

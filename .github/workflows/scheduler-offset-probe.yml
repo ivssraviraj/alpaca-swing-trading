@@ -1,0 +1,101 @@
+name: Scheduler Offset Probe
+run-name: Scheduler offset probe · ${{ github.event_name }} · ${{ github.run_number }}
+on:
+  schedule:
+    # Every 15 minutes, all day and every day, including weekends. UTC.
+    - cron: '7,22,37,52 * * * *'
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/scheduler-offset-probe.yml
+permissions:
+  contents: read
+  actions: read
+# Deliberately independent of the trading executor's concurrency and environment.
+jobs:
+  heartbeat:
+    name: Scheduler offset probe
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Record trigger and runner timestamps
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          from datetime import datetime, timezone
+          from pathlib import Path
+          from urllib.request import Request, urlopen
+          from zoneinfo import ZoneInfo
+
+          now = datetime.now(timezone.utc)
+          event = json.loads(Path(os.environ["GITHUB_EVENT_PATH"]).read_text())
+          repo = os.environ["GITHUB_REPOSITORY"]
+          run_id = os.environ["GITHUB_RUN_ID"]
+          attempt = os.environ["GITHUB_RUN_ATTEMPT"]
+          root = f"{os.environ['GITHUB_API_URL']}/repos/{repo}/actions/runs/{run_id}"
+
+          def get_json(url):
+              request = Request(url, headers={
+                  "Authorization": f"Bearer {os.environ['GH_TOKEN']}",
+                  "Accept": "application/vnd.github+json",
+                  "X-GitHub-Api-Version": "2026-03-10",
+              })
+              with urlopen(request, timeout=15) as response:
+                  return json.load(response)
+
+          def in_new_york(value):
+              return datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone(
+                  ZoneInfo("America/New_York")
+              ).isoformat()
+
+          receipt = {
+              "event": os.environ["GITHUB_EVENT_NAME"],
+              "cron_expression": event.get("schedule"),
+              "run_id": run_id,
+              "run_attempt": attempt,
+              "revision": os.environ["GITHUB_SHA"],
+              "probe_started_at_utc": now.isoformat(),
+              "probe_started_at_new_york": in_new_york(now.isoformat()),
+              "run_url": f"{os.environ['GITHUB_SERVER_URL']}/{repo}/actions/runs/{run_id}",
+              "nominal_scheduled_at": None,
+          }
+          error = None
+          try:
+              run = get_json(f"{root}/attempts/{attempt}")
+              jobs = get_json(f"{root}/attempts/{attempt}/jobs?per_page=100")["jobs"]
+              job = next(job for job in jobs if job["name"] == "Scheduler offset probe")
+              created, started = run["created_at"], job["started_at"]
+              receipt.update({
+                  "run_created_at_utc": created,
+                  "run_created_at_new_york": in_new_york(created),
+                  "job_started_at_utc": started,
+                  "job_started_at_new_york": in_new_york(started),
+                  "creation_to_job_start_seconds": (
+                      datetime.fromisoformat(started.replace("Z", "+00:00"))
+                      - datetime.fromisoformat(created.replace("Z", "+00:00"))
+                  ).total_seconds(),
+              })
+          except Exception as exc:
+              error = type(exc).__name__
+              receipt["metadata_error"] = error
+
+          print(json.dumps(receipt, sort_keys=True))
+          summary = ["## Scheduler offset probe", "", "| Field | Value |", "|---|---|"]
+          summary.extend(f"| {key} | `{value}` |" for key, value in receipt.items())
+          summary.extend([
+              "", "Only an event of `schedule` proves automatic cron delivery.",
+              "Push and manual runs verify the probe, not the scheduler.",
+              "GitHub does not provide the nominal firing timestamp here; runner delay",
+              "does not measure schedule delay. Compare missing slots from outside this run.",
+              "This probe does not check out or execute the trading application.",
+          ])
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as handle:
+              handle.write("\n".join(summary) + "\n")
+          if error:
+              raise SystemExit(f"Heartbeat ran, but timestamp metadata lookup failed: {error}")
+          PY
